@@ -41,6 +41,7 @@ struct ReadStatements {
 
 struct WriteStatements {
     let insertPost: OpaquePointer?
+    let postMetadata: OpaquePointer?
     let insertLike: OpaquePointer?
     let postExists: OpaquePointer?
 }
@@ -133,7 +134,8 @@ final class Database: @unchecked Sendable {
 
     private static func prepareWriteStatements(_ db: OpaquePointer) throws -> WriteStatements {
         WriteStatements(
-            insertPost: try prepare(db, "INSERT INTO posts (user_id, body) VALUES (?1, ?2) RETURNING id, created_at"),
+            insertPost: try prepare(db, "INSERT INTO posts (user_id, body) VALUES (?1, ?2)"),
+            postMetadata: try prepare(db, "SELECT id, created_at FROM posts WHERE id = last_insert_rowid()"),
             insertLike: try prepare(
                 db,
                 "INSERT INTO likes (user_id, post_id) VALUES (?1, ?2) ON CONFLICT (user_id, post_id) DO NOTHING"
@@ -233,7 +235,7 @@ final class Database: @unchecked Sendable {
         }
     }
 
-    /// POST /posts — insert and return (id, created_at) from RETURNING.
+    /// POST /posts — insert, then read back generated metadata on the writer connection.
     func createPost(userId: Int64, body: String) async throws -> (id: Int64, createdAt: String) {
         try await write { db, statements in
             var body = body
@@ -245,11 +247,16 @@ final class Database: @unchecked Sendable {
                     statements.insertPost, 2,
                     utf8.baseAddress, Int32(utf8.count), SQLITE_STATIC
                 )
-                guard sqlite3_step(statements.insertPost) == SQLITE_ROW else {
+                guard sqlite3_step(statements.insertPost) == SQLITE_DONE else {
                     throw SQLiteError(message: String(cString: sqlite3_errmsg(db)))
                 }
-                let id = sqlite3_column_int64(statements.insertPost, 0)
-                let createdAt = String(cString: sqlite3_column_text(statements.insertPost, 1))
+                sqlite3_reset(statements.postMetadata)
+                defer { sqlite3_reset(statements.postMetadata) }
+                guard sqlite3_step(statements.postMetadata) == SQLITE_ROW else {
+                    throw SQLiteError(message: String(cString: sqlite3_errmsg(db)))
+                }
+                let id = sqlite3_column_int64(statements.postMetadata, 0)
+                let createdAt = String(cString: sqlite3_column_text(statements.postMetadata, 1))
                 return (id: id, createdAt: createdAt)
             }
         }

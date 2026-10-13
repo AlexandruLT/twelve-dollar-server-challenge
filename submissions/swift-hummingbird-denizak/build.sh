@@ -4,9 +4,15 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # SWIFT_BIN env override is handy for local (non-Ubuntu) testing.
-SWIFT="${SWIFT_BIN:-/opt/swift/usr/bin/swift}"
-if [ ! -x "$SWIFT" ]; then
-    echo "Swift toolchain not found at $SWIFT — run install.sh first" >&2
+if [ -n "${SWIFT_BIN:-}" ]; then
+    SWIFT="$SWIFT_BIN"
+elif [ -x /opt/swift/usr/bin/swift ]; then
+    SWIFT=/opt/swift/usr/bin/swift
+else
+    SWIFT="$(command -v swift || true)"
+fi
+if [ -z "$SWIFT" ] || [ ! -x "$SWIFT" ]; then
+    echo "Swift toolchain not found (set SWIFT_BIN or install Swift on PATH)" >&2
     exit 1
 fi
 

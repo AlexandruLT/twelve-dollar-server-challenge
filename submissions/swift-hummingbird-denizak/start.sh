@@ -6,7 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 # The binary links the toolchain's shared Swift runtime; make sure it is findable.
-export LD_LIBRARY_PATH="/opt/swift/usr/lib/swift/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+if [ -d /opt/swift/usr/lib/swift/linux ]; then
+    export LD_LIBRARY_PATH="/opt/swift/usr/lib/swift/linux${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+fi
 
 export HOST="${HOST:-0.0.0.0}"
 export PORT="${PORT:-80}"
