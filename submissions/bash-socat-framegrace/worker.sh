@@ -7,16 +7,20 @@ export LC_ALL=C
 # Clean up SQLite coprocess when worker exits
 cleanup() {
     if [[ -n "${SQLITE_PID:-}" ]]; then
+        if [[ -n "${SQLITE[1]:-}" ]]; then
+            printf ".exit\n" >&"${SQLITE[1]}" 2>/dev/null || true
+        fi
         kill "$SQLITE_PID" 2>/dev/null || true
+        wait "$SQLITE_PID" 2>/dev/null || true
     fi
 }
 trap cleanup EXIT
 
 # Initialize persistent SQLite coprocess
-coproc SQLITE { sqlite3 -batch "$SQLITE_PATH" 2>&1; }
+coproc SQLITE { exec sqlite3 -batch "$SQLITE_PATH" 2>&1; }
 
-# Configure SQLite for high-concurrency WAL mode and memory-mapped reads
-printf "PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL; PRAGMA mmap_size=268435456; PRAGMA cache_size=-8000; PRAGMA temp_store=MEMORY; PRAGMA busy_timeout=5000;\nSELECT '__READY__';\n" >&"${SQLITE[1]}"
+# Configure SQLite for high-concurrency WAL mode and low memory footprint
+printf "PRAGMA synchronous=NORMAL; PRAGMA cache_size=-2000; PRAGMA temp_store=MEMORY; PRAGMA busy_timeout=5000;\nSELECT '__READY__';\n" >&"${SQLITE[1]}"
 while IFS= read -r line <&"${SQLITE[0]}"; do
     [[ "$line" == "__READY__" ]] && break
 done
@@ -204,14 +208,16 @@ while IFS= read -r -t 70 request_line; do
             if [[ "$post_id" == */* || "$post_id" != [1-9]* || "$post_id" == *[!0-9]* ]]; then
                 send_err "400 Bad Request" "invalid post id" "$resp_conn"
             else
-                like_sql="SELECT CASE WHEN NOT EXISTS (SELECT 1 FROM posts WHERE id = $post_id) THEN '404' ELSE 'OK' END; INSERT INTO likes (user_id, post_id) SELECT $AUTH_UID, $post_id WHERE EXISTS (SELECT 1 FROM posts WHERE id = $post_id) ON CONFLICT DO NOTHING RETURNING 201;"
-                query_sqlite "$like_sql"
-                if [[ "$SQL_OUT" == 404* ]]; then
+                query_sqlite "SELECT 1 FROM posts WHERE id = $post_id;"
+                if [[ "$SQL_OUT" != "1" ]]; then
                     send_err "404 Not Found" "post not found" "$resp_conn"
-                elif [[ "$SQL_OUT" == *201* ]]; then
-                    send_resp "201 Created" "{\"liked\":true,\"already_liked\":false,\"post_id\":$post_id}" "$resp_conn"
                 else
-                    send_resp "200 OK" "{\"liked\":true,\"already_liked\":true,\"post_id\":$post_id}" "$resp_conn"
+                    query_sqlite "INSERT INTO likes (user_id, post_id) VALUES ($AUTH_UID, $post_id) ON CONFLICT DO NOTHING RETURNING 201;"
+                    if [[ "$SQL_OUT" == "201" ]]; then
+                        send_resp "201 Created" "{\"liked\":true,\"already_liked\":false,\"post_id\":$post_id}" "$resp_conn"
+                    else
+                        send_resp "200 OK" "{\"liked\":true,\"already_liked\":true,\"post_id\":$post_id}" "$resp_conn"
+                    fi
                 fi
             fi
         fi
@@ -226,17 +232,19 @@ while IFS= read -r -t 70 request_line; do
         else
             escaped_username="${AUTH_USER//\'/\'\'}"
             escaped_body="${body//\'/\'\'}"
-            create_sql="SELECT CASE WHEN NOT json_valid('$escaped_body') THEN 'ERR:400:malformed JSON body' WHEN typeof(json_extract('$escaped_body', '$.body')) != 'text' OR length(trim(json_extract('$escaped_body', '$.body'))) = 0 THEN 'ERR:400:body is required' WHEN length(trim(json_extract('$escaped_body', '$.body'))) > 500 THEN 'ERR:400:body must be at most 500 characters' ELSE 'OK' END; INSERT INTO posts (user_id, body) SELECT $AUTH_UID, trim(json_extract('$escaped_body', '$.body')) WHERE json_valid('$escaped_body') AND typeof(json_extract('$escaped_body', '$.body')) = 'text' AND length(trim(json_extract('$escaped_body', '$.body'))) BETWEEN 1 AND 500 RETURNING json_object('post', json_object('id', id, 'body', body, 'created_at', created_at, 'author', '$escaped_username', 'like_count', 0));"
-            query_sqlite "$create_sql"
+            val_sql="SELECT CASE WHEN NOT json_valid('$escaped_body') THEN 'ERR:400:malformed JSON body' WHEN typeof(json_extract('$escaped_body', '$.body')) != 'text' OR length(trim(json_extract('$escaped_body', '$.body'))) = 0 THEN 'ERR:400:body is required' WHEN length(trim(json_extract('$escaped_body', '$.body'))) > 500 THEN 'ERR:400:body must be at most 500 characters' ELSE 'OK:' || trim(json_extract('$escaped_body', '$.body')) END;"
+            query_sqlite "$val_sql"
 
             if [[ "$SQL_OUT" == ERR:* ]]; then
                 err_code="${SQL_OUT#ERR:}"
                 err_msg="${err_code#*:}"
                 err_status="${err_code%%:*}"
                 send_err "$err_status" "$err_msg" "$resp_conn"
-            else
-                post_json="${SQL_OUT#*$'\n'}"
-                send_resp "201 Created" "$post_json" "$resp_conn"
+            elif [[ "$SQL_OUT" == OK:* ]]; then
+                trimmed_body="${SQL_OUT#OK:}"
+                escaped_trimmed_body="${trimmed_body//\'/\'\'}"
+                query_sqlite "INSERT INTO posts (user_id, body) VALUES ($AUTH_UID, '$escaped_trimmed_body') RETURNING json_object('post', json_object('id', id, 'body', body, 'created_at', created_at, 'author', '$escaped_username', 'like_count', 0));"
+                send_resp "201 Created" "$SQL_OUT" "$resp_conn"
             fi
         fi
 
