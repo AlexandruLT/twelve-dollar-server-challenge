@@ -36,6 +36,7 @@ Early readings taken under background load were discarded; table uses contention
 | ours | 70,000 | 2 min | ~220µs | ~8ms | 0 | PASS |
 | ours | 85,000 | 2 min | ~400µs | ~8.5ms | 0 / 1.56M | **PASS** (final binary; k6 RAM is the next wall) |
 | ours | 110,000 | 2 min | ~360µs | ~533µs | 4 / 1.78M | **PASS** (final binary) |
+| ours | 110,000 | 5 min (official-shaped) | ~370µs | ~531µs | 9 / 4.45M | **PASS** (final binary) |
 | ours | 120,000 | 2 min | ~510ms | ~589ms | 1 / 1.87M | marginal FAIL (p95 over 500ms) |
 | ours | 135,000 | 2 min | ~606ms | ~844ms | 12 / 1.91M | FAIL (p95) |
 | ours | 150,000 | 2 min | ~772ms | ~940ms | 313 / 1.9M | FAIL (p95) |

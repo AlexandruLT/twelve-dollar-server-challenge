@@ -63,8 +63,9 @@ while sailing past the descriptor limit honestly:
 ## Measured (CachyOS x86_64, Zen 5, droplet-limits container: 1 CPU, 2 GB, no swap, nofile=65535)
 
 ### Where is the ceiling?
-Proven: **110k users PASS with margin** (1.78M checks, 4 fails, p95 362us, p99
-533us), plus 70k/85k/100k PASS. At 120k the p95 sits right on the 500 ms limit
+Proven: **110k users PASS with 1000x margin** (4.45M checks, 9 fails, p95
+370us, p99 531us, official-shaped 2-min warmup + 5-min hold, final binary),
+plus 70k/85k/100k PASS. At 120k the p95 sits right on the 500 ms limit
 (510 ms: fail), and it climbs steeply after (~772 ms at 150k) — so the honest
 max on equivalent hardware is **~110k users**, and the binding constraint is
 **p95 latency**, not errors or memory. What sets it:
