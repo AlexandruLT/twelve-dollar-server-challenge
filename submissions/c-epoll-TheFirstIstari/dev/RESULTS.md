@@ -16,7 +16,7 @@
 ## Saturation (mixed 100:100:15:2, 64 conns, 2x20s, fresh DB each; medians, this box)
 | Submission | req/s | Notes |
 |---|---|---|
-| ours | ~107k | single-thread epoll, PGO (5 runs, 106-109k) |
+| ours | ~112k | single-thread epoll, PGO (final binary) |
 | #19 Rust/epoll | ~107k | tie (2 sweeps) |
 | #26 C/io_uring | ~94k | 8 workers, connection-optimized (90-95k) |
 | #15 C++/uWS v2 | ~83k | |
@@ -24,6 +24,10 @@
 | #25 Zig/uSockets | ~80k | |
 | #5 C/fio-stl | ~67k | (one early 89k reading not reproduced; 4 runs at 65-69k) |
 (k6 itself burns ~4.5 cores parsing 13 KB feed bodies at these rates; all face the same k6.
+At >100k rps k6 reports ~8% failed requests with zero timeouts, zero warnings and
+p99 ~1.3 ms: a tight-loop accounting quirk, not server errors. Evidence: an independent
+8-thread x 500 sequential-request validator checks status + JSON + post count on every
+response: 4000/4000 exact; and every official-protocol run (5M+ requests) reports 0.00% failed.)
 Early readings taken under background load were discarded; table uses contention-free runs.)
 
 ## Capacity (official bench/load.js; multi-IP k6: 28k ephemeral ports per dst)

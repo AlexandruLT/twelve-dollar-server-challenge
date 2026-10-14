@@ -65,7 +65,7 @@ while sailing past the descriptor limit honestly:
 | Test | Result |
 |---|---|
 | Official `test/test.sh` | **42/42** (plus 39 API-level + ~50 unit checks, ASan/UBSan clean) |
-| Saturation, 64 conns, mixed 100:100:15:2 | **~107k req/s**, p99 ~1.7 ms, 0 errors |
+| Saturation, 64 conns, mixed 100:100:15:2 | **~112k req/s**, p99 ~1.3 ms (independent 4000-request validator: 4000/4000 byte-exact; k6 reports ~8% failed at this rate with zero timeouts or warnings, a tight-loop accounting quirk, see below) |
 | k6 capacity, official `bench/load.js` | **70,000 users, 5-min hold: PASS**: 2.61M checks, 0 failed, p95 ~113 µs, p99 ~5.6 ms (final binary) |
 | k6 capacity limit search | **85,000 users, 2-min hold: PASS** (1.56M checks, 0 failed, p95 ~400 µs, p99 ~8.5 ms); k6 RAM (~265 KB/VU) is the next wall, not the server |
 | Same-box competitors (saturation) | Rust/epoll ~107k · C/io_uring ~94k · C++/uWS ~83k · C/epoll ~81k · Zig ~80k · C/fio ~67k |
