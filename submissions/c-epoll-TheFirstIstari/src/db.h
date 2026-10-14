@@ -10,6 +10,7 @@ typedef struct {
                *st_like, *st_exists,
                *st_begin, *st_commit, *st_rollback;
   int wal_frames;   // frames since last checkpoint (via WAL hook)
+  unsigned long long last_ckpt_ms; // last checkpoint attempt (pacing)
   int in_txn;       // group-commit transaction currently open
   int batch_failed; // a mid-batch rollback poisoned this batch (owner clears per iteration)
 } db_t;

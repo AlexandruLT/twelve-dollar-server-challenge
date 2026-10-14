@@ -1,8 +1,14 @@
 #include "db.h"
 #include <stdio.h>
+#include <time.h>
 #include <string.h>
+#include <stdint.h>
 
-#define CKPT_FRAMES 1000
+#define CKPT_FRAMES 4000
+/* Checkpoint at most once per second: under write-heavy load the frame count
+   is always above threshold, and attempting a checkpoint after every commit
+   burns CPU + fsync storms for no gain (measured: 70%+ CPU at 150k users).
+   The 64MB journal_size_limit still bounds WAL size between checkpoints. */
 
 static int exec_all(db_t *d, const char *sql) {
   char *err = NULL;
@@ -109,6 +115,11 @@ int db_rollback(db_t *d) {
 
 void db_checkpoint_maybe(db_t *d) {
   if (d->wal_frames < CKPT_FRAMES) return;
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  uint64_t now_ms = (uint64_t)ts.tv_sec * 1000 + (uint64_t)(ts.tv_nsec / 1000000);
+  if (now_ms - d->last_ckpt_ms < 1000) return;
+  d->last_ckpt_ms = now_ms;
   d->wal_frames = 0;
   // PASSIVE: never blocks the loop; restarts the WAL when possible.
   sqlite3_wal_checkpoint_v2(d->db, NULL, SQLITE_CHECKPOINT_PASSIVE, NULL, NULL);

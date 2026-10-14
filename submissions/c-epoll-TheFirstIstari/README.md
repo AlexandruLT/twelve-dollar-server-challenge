@@ -62,12 +62,34 @@ while sailing past the descriptor limit honestly:
 
 ## Measured (CachyOS x86_64, Zen 5, droplet-limits container: 1 CPU, 2 GB, no swap, nofile=65535)
 
+### Where is the ceiling?
+Proven: **110k users PASS with margin** (1.78M checks, 4 fails, p95 362us, p99
+533us), plus 70k/85k/100k PASS. At 120k the p95 sits right on the 500 ms limit
+(510 ms: fail), and it climbs steeply after (~772 ms at 150k) — so the honest
+max on equivalent hardware is **~110k users**, and the binding constraint is
+**p95 latency**, not errors or memory. What sets it:
+- **FDs are not the ceiling** (eviction holds ~60k by design) and **RAM is not
+  the ceiling** (~250 MB at 150k, 8x headroom).
+- Past ~60k users every excess user reconnects per iteration (~5k reconnects/s
+  at 150k). Sheds are token-bucket paced (10k/s, no bursts); without pacing,
+  mass closes overflow the listen backlog and TCP retransmit backoff avalanches
+  (measured). The remaining cost is per-reconnect accept + iteration work.
+- Our Docker harness adds kernel packet overhead the droplet will not have
+  (125k conntrack entries from churned loopback connections; stock Ubuntu has
+  no iptables rules forcing conntrack). Expect equal-or-better on the droplet.
+- Bisected: 110k passes with 1000x headroom, 120k touches the limit, 135-150k exceed it.
+  The knee is sharp (queueing cliff as eviction churn grows);
+  the CPU wall sits a little beyond that. k6 itself cannot verify past ~85k on
+  one box (~265 KB/VU); higher numbers use `dev/capgen.c` (k6-exact loop,
+  ~100 bytes/VU, calibrated against k6).
+
 | Test | Result |
 |---|---|
 | Official `test/test.sh` | **42/42** (plus 39 API-level + ~50 unit checks, ASan/UBSan clean) |
 | Saturation, 64 conns, mixed 100:100:15:2 | **~112k req/s**, p99 ~1.3 ms (independent 4000-request validator: 4000/4000 byte-exact; k6 reports ~8% failed at this rate with zero timeouts or warnings, a tight-loop accounting quirk, see below) |
 | k6 capacity, official `bench/load.js` | **70,000 users, 5-min hold: PASS**: 2.61M checks, 0 failed, p95 ~113 µs, p99 ~5.6 ms (final binary) |
 | k6 capacity limit search | **85,000 users, 2-min hold: PASS** (1.56M checks, 0 failed, p95 ~400 µs, p99 ~8.5 ms); k6 RAM (~265 KB/VU) is the next wall, not the server |
+| capgen limit search (k6-exact loop) | **110k/2-min PASS**, 120k marginal (p95 510 ms), 135k/150k over (see ceiling analysis) |
 | Same-box competitors (saturation) | Rust/epoll ~107k · C/io_uring ~94k · C++/uWS ~83k · C/epoll ~81k · Zig ~80k · C/fio ~67k |
 | Head-to-head capacity (70k, 5-min) | Champion C/io_uring passes too (p95 ~5 ms, p99 ~10.6 ms, ~330 MB); ours at p95 ~120 µs, p99 ~5.3 ms |
 

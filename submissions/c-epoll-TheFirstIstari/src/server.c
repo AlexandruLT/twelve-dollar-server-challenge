@@ -17,6 +17,7 @@
 #include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <sys/ioctl.h>
 #include <sys/resource.h>
 #include "conn.h"
 #include "http.h"
@@ -30,12 +31,13 @@ static db_t Gdb;
 static api_t Gapi;
 static char Gscratch[API_SCRATCH];
 static uint64_t Gnow_s, Gmono_s;
+static uint64_t Gnow_ms; // millisecond clock: sub-second pacing without extra syscalls
 static char Gdate[40];
 static size_t Gdate_len;
 static int Glisten_fd = -1, Gep_fd = -1;
 static volatile int Gstop = 0;
 static wheel_t Gwheel;
-static evict_t Gev = { 0, 0, 0, 32 };
+static evict_t Gev = { 0, 0, 0, 32, 0, 0, 0 };
 static int Gemfile_backoff = 0;   // accept paused (until this second)
 static long Gsoft_fds = 65535;    // raised soft RLIMIT value
 // UAF guard: conn_close records the freed object here. Any path that may
@@ -78,6 +80,7 @@ static void clock_tick(void) {
   clock_gettime(CLOCK_REALTIME, &ts);
   clock_gettime(CLOCK_MONOTONIC, &tmo);
   Gmono_s = (uint64_t)tmo.tv_sec;
+  Gnow_ms = (uint64_t)tmo.tv_sec * 1000 + (uint64_t)(tmo.tv_nsec / 1000000);
   uint64_t s = (uint64_t)ts.tv_sec;
   if (s == Gnow_s) return;
   Gnow_s = s;
@@ -188,7 +191,29 @@ static void conn_set_wr(conn_t *c, int on) {
   ev.events = EPOLLET | EPOLLRDHUP | (c->want_read ? EPOLLIN : 0) | (on ? EPOLLOUT : 0);
   epoll_ctl(Gep_fd, EPOLL_CTL_MOD, c->fd, &ev);
 }
+#ifdef COUNT_CLOSES
+static unsigned long close_from[16] = {0};
+static const char *close_tag[16] = {
+  "shed", "expire-idle", "expire-stall", "recv-eof", "recv-err", "frame-err",
+  "frame-oom", "send-err", "send-eagain?", "post-send", "accept?", "500-conv?",
+  "other1", "other2", "other3", "other4"};
+#define COUNT_CLOSE(i) do { close_from[i]++; } while (0)
+static uint64_t last_dump_ms = 0;
+static void maybe_dump_closes(void) {
+  if (Gnow_ms - last_dump_ms < 5000) return;
+  last_dump_ms = Gnow_ms;
+  fprintf(stderr, "closes:");
+  for (int i = 0; i < 16; i++) if (close_from[i]) fprintf(stderr, " %s=%lu", close_tag[i], close_from[i]);
+  fprintf(stderr, " open=%ld level=%d\n", Gev.open_conns, Gev.level);
+}
+#else
+#define COUNT_CLOSE(i) do {} while (0)
+#define maybe_dump_closes() do {} while (0)
+#endif
+static int close_site = -1; /* set before each conn_close call site */
 static void conn_close(conn_t *c) {
+  COUNT_CLOSE(close_site < 0 ? 15 : close_site);
+  close_site = -1;
   Gclosed = c;
   epoll_ctl(Gep_fd, EPOLL_CTL_DEL, c->fd, NULL);
   wheel_disarm(&Gwheel, c);
@@ -202,11 +227,11 @@ static void on_expire(conn_t *c, void *arg) {
   uint32_t now = (uint32_t)Gnow_s;
   int busy = (c->in_len > 0 || c->out != NULL);
   if (busy) {
-    if (now - c->req_since >= CONN_STALL_S) { conn_close(c); return; }
+    if (now - c->req_since >= CONN_STALL_S) { close_site = 2; conn_close(c); return; }
     wheel_arm(&Gwheel, c, now, c->req_since + CONN_STALL_S - now);
     return;
   }
-  if (now - c->last_act >= CONN_KEEPALIVE_S) { conn_close(c); return; }
+  if (now - c->last_act >= CONN_KEEPALIVE_S) { close_site = 1; conn_close(c); return; }
   wheel_arm(&Gwheel, c, now, c->last_act + CONN_KEEPALIVE_S - now);
 }
 
@@ -269,24 +294,44 @@ static void evict_sample(void) {
     if (usable < MEM_SHED_MB && Gev.level < 2) Gev.level = 2;
     else if (usable < MEM_STOP_MB && Gev.level < 1) Gev.level = 1;
   }
-  // active shedding: close fully-idle conns, oldest first (wheel order approx)
-  if (Gev.level > 0 && now - Gev.last_shed >= 1) {
-    Gev.last_shed = now;
-    long quota = (Gev.open_conns - rel) / 32 + 1;
-    if (quota > 2048) quota = 2048;
-    for (unsigned i = 0; i < WHEEL_SIZE && quota > 0; i++) {
-      conn_t *c = Gwheel.slot[i].head;
+  /* Trickle shedding: a token bucket paces closes to a smooth, sustainable
+     rate (default 2500 per 250ms window = 10k/s). Bursty mass-closes would
+     synchronize thousands of reconnects and overflow the listen backlog,
+     whose retransmit backoff then avalanches (measured at 100k users).
+     The walk rotates so each call does bounded work. */
+  if (Gev.level > 0) {
+    uint64_t win = Gnow_ms / 250;
+    if (win != Gev.shed_win) { Gev.shed_win = win; Gev.shed_budget = 2500; }
+    long quota = Gev.shed_budget;
+    if (quota > 512) quota = 512; // per-call bound
+    if (quota > 0) {
       long closed = 0;
-      while (c && quota > 0) {
-        conn_t *nx = c->wnext;
-        if (!c->closing && !c->out && c->in_len == 0 &&
-            now - c->last_act >= (uint32_t)(Gev.level == 2 ? 0 : 2)) {
-          conn_close(c);
-          quota--; closed++;
+      unsigned scanned = 0;
+      for (unsigned k = 0; k < WHEEL_SIZE && quota > 0 && scanned < 32; k++) {
+        unsigned i = (Gev.walk_from + k) & (WHEEL_SIZE - 1);
+        scanned++;
+        conn_t *c = Gwheel.slot[i].head;
+        while (c && quota > 0) {
+          conn_t *nx = c->wnext;
+          if (!c->closing && !c->out && c->in_len == 0 &&
+              now - c->last_act >= (uint32_t)(Gev.level == 2 ? 0 : 2)) {
+            /* Never shed a conn with bytes waiting in the kernel: that is an
+               unprocessed request, and closing it would silently drop it (the
+               client sees FIN/RST instead of a response). It gets served
+               normally (likely with Connection: close) and sheds later idle. */
+            int pending = 0;
+            if (ioctl(c->fd, FIONREAD, &pending) != 0 || pending <= 0) {
+              close_site = 0; conn_close(c);
+              quota--; closed++;
+            }
+          }
+          c = nx;
         }
-        c = nx;
       }
-      if (closed) fprintf(stderr, "evict: shed %ld idle (level %d)\n", closed, Gev.level);
+      Gev.walk_from = (Gev.walk_from + scanned) & (WHEEL_SIZE - 1);
+      Gev.shed_budget -= closed;
+      Gev.last_shed = now;
+      if (closed >= 64) fprintf(stderr, "evict: shed %ld idle (level %d)\n", closed, Gev.level);
     }
   }
 }
@@ -315,11 +360,11 @@ static void frame_response(conn_t *c, const resp_t *r, int close_after) {
       "HTTP/1.1 %d %s\r\n%.*sContent-Type: application/json\r\nContent-Length: %zu\r\nConnection: %s\r\n\r\n",
       r->status, reason(r->status), (int)Gdate_len, Gdate,
       r->body_len, close_after ? "close" : "keep-alive");
-  if (hn < 0 || hn >= (int)sizeof hdr) { conn_close(c); return; }
+  if (hn < 0 || hn >= (int)sizeof hdr) { close_site = 5; conn_close(c); return; }
   size_t total = (size_t)hn + r->body_len;
   free(c->out); // by construction none pending; be safe
   c->out = malloc(total ? total : 1);
-  if (!c->out) { conn_close(c); return; }
+  if (!c->out) { close_site = 6; conn_close(c); return; }
   memcpy(c->out, hdr, (size_t)hn);
   memcpy(c->out + hn, r->body, r->body_len);
   c->out_len = total; c->out_off = 0;
@@ -349,18 +394,18 @@ static void do_recv(conn_t *c) {
       if (need > c->in_cap) {
         size_t nc = c->in_cap ? c->in_cap * 2 : 4096;
         while (nc < need) nc *= 2;
-        if (nc > HTTP_MAX_TOTAL + 8192) { conn_close(c); return; }
+        if (nc > HTTP_MAX_TOTAL + 8192) { close_site = 5; conn_close(c); return; }
         char *nb = realloc(c->in, nc);
-        if (!nb) { conn_close(c); return; }
+        if (!nb) { close_site = 6; conn_close(c); return; }
         c->in = nb; c->in_cap = nc;
       }
       memcpy(c->in + c->in_len, tmp, (size_t)n);
       c->in_len = need;
       continue; // edge-triggered: drain until EAGAIN
     }
-    if (n == 0) { conn_close(c); return; } // orderly shutdown
+    if (n == 0) { close_site = 3; conn_close(c); return; } // orderly shutdown
     if (errno == EAGAIN || errno == EWOULDBLOCK) break;
-    conn_close(c); return; // RST / error
+    close_site = 4; conn_close(c); return; // RST / error
   }
   if (c->in_len == 0) return;
   // parse (possibly pipelined) requests
@@ -378,7 +423,7 @@ static void do_recv(conn_t *c) {
       }
       break; // need more data
     }
-    if (rc < 0) { conn_close(c); return; } // framing error / too large
+    if (rc < 0) { close_site = 5; conn_close(c); return; } // framing error / too large
     int idle_long = (c->last_act + 2 < (uint32_t)Gnow_s);
     c->last_act = (uint32_t)Gnow_s;
     c->req_since = (uint32_t)Gnow_s;
@@ -407,11 +452,11 @@ static void flush_send(conn_t *c) {
       conn_set_rd(c, 0); // strict per-conn serialization: no new reads while sending
       return;
     }
-    conn_close(c); return;
+    close_site = 7; conn_close(c); return;
   }
   free(c->out); c->out = NULL; c->out_len = c->out_off = 0;
   conn_set_wr(c, 0);
-  if (c->closing) { conn_close(c); return; }
+  if (c->closing) { close_site = 9; conn_close(c); return; }
   conn_set_rd(c, 1);
   c->req_since = (uint32_t)Gnow_s;
   wheel_arm(&Gwheel, c, (uint32_t)Gnow_s, CONN_KEEPALIVE_S);
@@ -419,7 +464,7 @@ static void flush_send(conn_t *c) {
 
 // ---------- accept ----------
 static void do_accept(void) {
-  for (int i = 0; i < 2048; i++) {
+  for (int i = 0; i < 8192; i++) {
     if (Gev.level >= 2) return; // shedding: leave backlog until pressure drops
     int fd = accept4(Glisten_fd, NULL, NULL, SOCK_NONBLOCK | SOCK_CLOEXEC);
     if (fd < 0) {
@@ -454,6 +499,7 @@ static void run_loop(void) {
   while (!Gstop) {
     Gdb.batch_failed = 0; // new batch: no poison yet
     clock_tick();
+    maybe_dump_closes();
     wheel_tick(&Gwheel, (uint32_t)Gnow_s, on_expire, NULL);
     evict_sample();
     int n = epoll_wait(Gep_fd, evts, 512, 100);
@@ -465,8 +511,8 @@ static void run_loop(void) {
       }
       conn_t *c = evts[i].data.ptr;
       uint32_t e = evts[i].events;
-      if (e & (EPOLLERR | EPOLLHUP)) { conn_close(c); continue; }
-      if ((e & EPOLLRDHUP) && !(e & EPOLLIN)) { conn_close(c); continue; }
+      if (e & (EPOLLERR | EPOLLHUP)) { close_site = 4; conn_close(c); continue; }
+      if ((e & EPOLLRDHUP) && !(e & EPOLLIN)) { close_site = 4; conn_close(c); continue; }
       if (e & EPOLLOUT) {
         Gclosed = NULL;
         flush_send(c);

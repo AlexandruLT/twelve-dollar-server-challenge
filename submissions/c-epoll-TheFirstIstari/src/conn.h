@@ -52,6 +52,9 @@ typedef struct {
   long open_conns;      // self-tracked socket count (exact, O(1))
   int level;            // 0 normal, 1 pressure, 2 critical
   uint32_t last_shed;   // last shedding second (hysteresis cadence)
+  uint64_t shed_win;    // current 250ms pacing window
+  long shed_budget;     // sheds allowed in this window (token bucket)
+  unsigned walk_from;   // rotating wheel start (bounded work per call)
   long fd_reserve;      // non-conn fds (listener, epoll, db, stdio...)
 } evict_t;
 
