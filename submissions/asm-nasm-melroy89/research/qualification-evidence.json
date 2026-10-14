@@ -95,8 +95,8 @@
       "count": 15220,
       "rate": 94.53371465095205
     },
-    "semantic_pass": true,
-    "accepted": true
+    "accepted": true,
+    "all_status_checks_pass": true
   },
   "result": {
     "exit_code": 0,
@@ -128,8 +128,8 @@
       "count": 10264833,
       "rate": 25639.113416741115
     },
-    "semantic_pass": true,
-    "accepted": true
+    "accepted": true,
+    "all_status_checks_pass": true
   },
   "elapsed_seconds_including_warmup": 578.3987033320009,
   "memory_peak_bytes": 1516208128,

@@ -1,6 +1,6 @@
 # Resumed qualification session
 
-Goal explicitly reactivated after the testing block; parallel final validation and research subsequently requested. No commits, pushes, paid provisioning or production changes. Measured baseline ASM source remains unchanged.
+Goal explicitly reactivated after the testing block; parallel final validation and research subsequently requested. At measurement time, no commits, pushes, paid provisioning or production changes had been performed. Measured baseline ASM source remains unchanged.
 
 | Local 275k short screen | Requests | HTTP failure rate | p95 ms | p99 ms | Peak server MiB | Gate |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |

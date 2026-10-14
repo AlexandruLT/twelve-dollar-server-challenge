@@ -399,7 +399,7 @@ and generator resource record.
 - Hardware profiling was attempted and denied (perf_event_paranoid=4);
   do not change host perf settings to obtain them.
 
-No code has been committed, pushed or deployed.
+These historical records preceded PR publication. No deployment has been performed.
 
 ## Latest qualification before submission
 

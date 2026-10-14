@@ -116,4 +116,4 @@ Raw: results/optimized-275000-confirmation-evidence.json, its k6 summary/log,
 and generator resource record.
 
 User requested no more tests today. No PR, commit or push was performed.
-Local review draft: TMP-PR-DESC.md. Whole-field superiority remains unproven.
+The local review draft was subsequently transferred into the PR description and removed. Whole-field superiority remains unproven.
