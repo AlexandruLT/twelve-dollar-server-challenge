@@ -18,6 +18,7 @@ start.sh runs in the foreground using only the four environment variables in SPE
 - Rust 1.94.0, edition 2024, native instructions, fat LTO and one codegen unit. Dependencies are pinned in Cargo.toml and Cargo.lock.
 - SQLite 3.53.4, checksum-verified official source and raw C bindings. Prepared statements cache plans only. One NOMUTEX connection is held under the same mutex for every query/commit/checkpoint batch. SQLite is compiled with SQLITE_THREADSAFE=0; workers never enter it concurrently.
 - io_uring issuers use multishot direct accept/receive, fixed socket descriptors, provided buffers and batched completions. Tables adapt to the inherited hard limit: eight rings of 65,535 slots under the spec limit, or one ring of 524,280 slots with a one-million limit. Accepted sockets occupy those tables instead of ordinary process descriptors, lifting the previous connection ceiling under LimitNOFILE=65535. The process raises only its own soft limit within the inherited hard limit.
+- Each ring has 4,096 receive buffers and submission entries, with 16,384 completion entries. Completed buffers are published before an intermediate full-queue submission. Depleted receives wait in a bounded retry queue; retries run after buffers are returned and responses are flushed, with budgets based on receive completions instead of resubmitting every ENOBUFS immediately.
 - Completion waits target 32 entries with a 250 μs maximum at sustained load, or wait for one completion when idle. These are I/O batching controls: successful writes commit before their responses are submitted.
 - One 64-byte connection record. Partial inputs allocate on demand. Output allocations remain fixed until the last send completion, then return to a bounded pool. Idle connections retain no response buffers. Generations reject stale completions after slot reuse; backpressure pauses reads until output drains.
 - Every feed first discovers the newest 20 IDs. If their span is under 256, live range scans fetch rows and like counts, then restore timestamp/ID order. Sparse IDs use the original query. No seed-specific IDs, cached results or changed indexes.
@@ -32,7 +33,7 @@ Unsafe code covers C bindings, Linux I/O, vector loads and compact owning buffer
 
 ## Validation and measurements
 
-The read-transaction follow-up results are below. The preceding io_uring measurements and profiles are in [IO_URING.md](IO_URING.md); older epoll comparisons and k6 searches are in [BENCHMARKS.md](BENCHMARKS.md).
+The results below cover the read-transaction follow-up at `bd517fa`, before the buffer/retry changes above. The preceding io_uring measurements and profiles are in [IO_URING.md](IO_URING.md); older epoll comparisons and k6 searches are in [BENCHMARKS.md](BENCHMARKS.md).
 
 On the native Xeon E5-2690 v3, with one server CPU, 2 GiB/no swap and the spec's 65,535 descriptors, the read-transaction/fdatasync follow-up compares against `b58c862`. Feed, post and creation use four balanced 15-second trials after five-second warmups; likes use six balanced 20-second trials after ten-second warmups. All use 64 connections and fresh seeds.
 
