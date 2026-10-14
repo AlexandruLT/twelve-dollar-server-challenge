@@ -31,8 +31,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen %s:%s: %v", host, port, err)
 	}
-	log.Printf("listening on %s:%s", host, port)
-	s.run()
+	log.Printf("listening on %s:%s (%s)", host, port, s.io.name())
+	s.io.run()
 }
 
 func raiseFileLimit() {

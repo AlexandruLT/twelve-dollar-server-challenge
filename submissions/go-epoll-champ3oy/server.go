@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"os"
 	"runtime"
 	"strconv"
 	"strings"
@@ -14,26 +15,27 @@ import (
 	"unicode/utf8"
 )
 
-// One epoll loop on one OS thread serves every connection. Idle connections cost a conn struct
-// and the kernel socket: input is read into one shared buffer and only a partial request is
-// copied into the connection, and output only stays on the connection when the socket is full.
+// One event loop on one OS thread serves every connection, through one of two I/O backends:
+// io_uring (uring.go), or epoll (epoll.go) when io_uring isn't available. Everything above the
+// socket level is shared: HTTP parsing, routing, rendering and the group commit.
 //
 // Writes (likes and new posts) are group-committed: the loop collects them while it works
-// through one batch of epoll events, runs them in a single transaction, and only then sends
-// their responses, so every 201 follows its COMMIT. WAL checkpoints run on a second thread.
+// through one batch of events, runs them in a single transaction, and only then sends their
+// responses, so every 201 follows its COMMIT. WAL checkpoints run on a second thread.
 
 type conn struct {
 	in, out      []byte
-	fd, gen      int32 // gen tells a reused fd number apart from the connection that had it before
+	id, gen      int32 // id: the fd (epoll) or ring*slots+slot (io_uring); gen tells reuses apart
+	sending      int32 // io_uring: sends in flight
 	open         bool
 	blocked      bool // a write is waiting for the group commit; later requests wait behind it
 	closeAfter   bool
-	pollOut      bool
+	pollOut      bool // epoll: waiting for the socket to become writable
 	sentContinue bool
 }
 
 type writeOp struct {
-	fd, gen        int32
+	id, gen        int32
 	create         bool
 	userID, postID int64
 	body, author   string
@@ -42,20 +44,28 @@ type writeOp struct {
 	lo, hi         int // the rendered post in server.stage
 }
 
+type ioBackend interface {
+	name() string
+	run()
+	send(c *conn, out []byte)
+	close(c *conn)
+	outPending(c *conn) bool // output not yet handed to the kernel in full
+}
+
 type server struct {
-	epfd, lfd, spare int
-	conns            []conn
-	events           []syscall.EpollEvent
-	nextGen          int32
-	rbuf, wbuf       []byte
-	stage            []byte
-	hdr              []byte
-	ops, opsSpare    []writeOp
-	jwt              *verifier
-	start            time.Time
-	checkpointReq    chan struct{}
-	checkpointPipe   int // read end; readable when a checkpoint has finished
-	checkpointing    bool
+	io             ioBackend
+	lfd            int
+	conns          []conn
+	nextGen        int32
+	wbuf           []byte
+	stage          []byte
+	hdr            []byte
+	ops, opsSpare  []writeOp
+	jwt            *verifier
+	start          time.Time
+	checkpointReq  chan struct{}
+	checkpointPipe int // read end; readable when a checkpoint has finished
+	checkpointing  bool
 }
 
 const (
@@ -63,41 +73,72 @@ const (
 	postRoom = headerRoom + 16<<10
 )
 
+// newServer listens and picks the I/O backend. It must run on the event loop's locked thread:
+// the io_uring rings are single-issuer.
 func newServer(host, port, secret string) (*server, error) {
 	s := &server{
-		conns:  make([]conn, 4096),
-		events: make([]syscall.EpollEvent, 1024),
-		rbuf:   make([]byte, 64<<10),
-		wbuf:   make([]byte, 0, 1<<20),
-		stage:  make([]byte, 0, 64<<10),
-		hdr:    make([]byte, 0, headerRoom),
-		jwt:    newVerifier(secret),
-		start:  time.Now(),
+		wbuf:  make([]byte, 0, 1<<20),
+		stage: make([]byte, 0, 64<<10),
+		hdr:   make([]byte, 0, headerRoom),
+		jwt:   newVerifier(secret),
+		start: time.Now(),
 	}
 	if err := s.listen(host, port); err != nil {
 		return nil, err
 	}
-	var err error
-	if s.epfd, err = syscall.EpollCreate1(syscall.EPOLL_CLOEXEC); err != nil {
-		return nil, err
-	}
-	ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(s.lfd)}
-	if err = syscall.EpollCtl(s.epfd, syscall.EPOLL_CTL_ADD, s.lfd, &ev); err != nil {
-		return nil, err
-	}
 	var p [2]int
-	if err = syscall.Pipe2(p[:], syscall.O_NONBLOCK|syscall.O_CLOEXEC); err != nil {
+	if err := syscall.Pipe2(p[:], syscall.O_NONBLOCK|syscall.O_CLOEXEC); err != nil {
 		return nil, err
 	}
 	s.checkpointPipe, s.checkpointReq = p[0], make(chan struct{}, 1)
-	ev = syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(p[0])}
-	if err = syscall.EpollCtl(s.epfd, syscall.EPOLL_CTL_ADD, p[0], &ev); err != nil {
+	go s.checkpointer(p[1])
+
+	if os.Getenv("SERVER_IO") != "epoll" {
+		u, err := newUringIO(s)
+		if err == nil {
+			s.io = u
+			return s, nil
+		}
+		log.Printf("io_uring unavailable (%v), falling back to epoll", err)
+	}
+	e, err := newEpollIO(s)
+	if err != nil {
 		return nil, err
 	}
-	go s.checkpointer(p[1])
-	// Held in reserve so that at the descriptor limit we can still accept and close.
-	s.spare, _ = syscall.Open("/dev/null", syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
+	s.io = e
 	return s, nil
+}
+
+func (s *server) newGen() int32 {
+	s.nextGen = (s.nextGen + 1) & genMask
+	return s.nextGen
+}
+
+// Generations fit in 24 bits so io_uring can carry them in a CQE's user_data.
+const genMask = 1<<24 - 1
+
+func (s *server) send(c *conn, out []byte) {
+	if len(out) > 0 && c.open {
+		s.io.send(c, out)
+	}
+}
+
+func (s *server) close(c *conn) { s.io.close(c) }
+
+// receive handles bytes that just arrived on c. data is only valid during the call.
+func (s *server) receive(c *conn, data []byte) {
+	if len(c.in) > 0 {
+		c.in = append(c.in, data...)
+		s.process(c, c.in, true)
+	} else {
+		s.process(c, data, false)
+	}
+}
+
+func (s *server) commitPending() {
+	for len(s.ops) > 0 && !s.checkpointing {
+		s.commit()
+	}
 }
 
 func (s *server) listen(host, portStr string) error {
@@ -130,114 +171,15 @@ func (s *server) listen(host, portStr string) error {
 	if err = syscall.Bind(fd, sa); err != nil {
 		return err
 	}
+	// Accepted sockets inherit TCP_NODELAY, which io_uring's descriptor-less sockets need.
+	if err = syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1); err != nil {
+		return err
+	}
 	if err = syscall.Listen(fd, 65535); err != nil { // the kernel caps it at net.core.somaxconn
 		return err
 	}
 	s.lfd = fd
 	return nil
-}
-
-func (s *server) run() {
-	for {
-		n, err := syscall.EpollWait(s.epfd, s.events, -1)
-		if err != nil {
-			if err == syscall.EINTR {
-				continue
-			}
-			log.Fatalf("epoll_wait: %v", err)
-		}
-		for i := 0; i < n; i++ {
-			ev := s.events[i]
-			fd := int(ev.Fd)
-			if fd == s.lfd {
-				s.accept()
-				continue
-			}
-			if fd == s.checkpointPipe {
-				s.checkpointDone()
-				continue
-			}
-			c := &s.conns[fd]
-			if !c.open || c.gen != ev.Pad {
-				continue // closed earlier in this batch
-			}
-			if ev.Events&syscall.EPOLLOUT != 0 {
-				s.flush(c)
-			}
-			if c.open && ev.Events&(syscall.EPOLLIN|syscall.EPOLLHUP|syscall.EPOLLERR) != 0 {
-				s.readable(c)
-			}
-		}
-		for len(s.ops) > 0 && !s.checkpointing {
-			s.commit()
-		}
-	}
-}
-
-func (s *server) accept() {
-	for {
-		fd, _, err := syscall.Accept4(s.lfd, syscall.SOCK_NONBLOCK|syscall.SOCK_CLOEXEC)
-		if err != nil {
-			switch err {
-			case syscall.EINTR, syscall.ECONNABORTED:
-				continue
-			case syscall.EMFILE, syscall.ENFILE:
-				// Out of descriptors: shed one waiting client rather than spin on the listener.
-				if s.spare >= 0 {
-					syscall.Close(s.spare)
-					if fd, _, err := syscall.Accept4(s.lfd, syscall.SOCK_CLOEXEC); err == nil {
-						syscall.Close(fd)
-					}
-					s.spare, _ = syscall.Open("/dev/null", syscall.O_RDONLY|syscall.O_CLOEXEC, 0)
-				}
-			}
-			return
-		}
-		syscall.SetsockoptInt(fd, syscall.IPPROTO_TCP, syscall.TCP_NODELAY, 1)
-		if fd >= len(s.conns) {
-			grown := make([]conn, max(fd+1, 2*len(s.conns)))
-			copy(grown, s.conns)
-			s.conns = grown
-		}
-		s.nextGen++
-		c := &s.conns[fd]
-		*c = conn{fd: int32(fd), gen: s.nextGen, open: true}
-		ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: int32(fd), Pad: c.gen}
-		if syscall.EpollCtl(s.epfd, syscall.EPOLL_CTL_ADD, fd, &ev) != nil {
-			s.close(c)
-		}
-	}
-}
-
-func (s *server) close(c *conn) {
-	syscall.Close(int(c.fd)) // also removes it from the epoll set
-	*c = conn{fd: c.fd, gen: c.gen}
-}
-
-func (s *server) setPollOut(c *conn, on bool) {
-	ev := syscall.EpollEvent{Events: syscall.EPOLLIN, Fd: c.fd, Pad: c.gen}
-	if on {
-		ev.Events |= syscall.EPOLLOUT
-	}
-	c.pollOut = on
-	syscall.EpollCtl(s.epfd, syscall.EPOLL_CTL_MOD, int(c.fd), &ev)
-}
-
-func (s *server) readable(c *conn) {
-	n, err := syscall.Read(int(c.fd), s.rbuf)
-	if err == syscall.EAGAIN || err == syscall.EINTR {
-		return
-	}
-	if n <= 0 || err != nil {
-		s.close(c)
-		return
-	}
-	if len(c.in) > 0 {
-		c.in = append(c.in, s.rbuf[:n]...)
-		s.process(c, c.in, true)
-	} else {
-		s.process(c, s.rbuf[:n], false)
-	}
 }
 
 // process handles every complete request in data (c.in when owned, else the shared read
@@ -289,60 +231,7 @@ loop:
 	}
 
 	s.send(c, out)
-	if c.open && c.closeAfter && !c.blocked && len(c.out) == 0 {
-		s.close(c)
-	}
-}
-
-// send writes out to the socket, keeping whatever doesn't fit until the socket is writable.
-func (s *server) send(c *conn, out []byte) {
-	if len(out) == 0 || !c.open {
-		return
-	}
-	if len(c.out) > 0 {
-		c.out = append(c.out, out...)
-		return
-	}
-	for len(out) > 0 {
-		n, err := syscall.Write(int(c.fd), out)
-		if err == syscall.EINTR {
-			continue
-		}
-		if err == syscall.EAGAIN {
-			break
-		}
-		if err != nil {
-			s.close(c)
-			return
-		}
-		out = out[n:]
-	}
-	if len(out) > 0 {
-		c.out = append([]byte(nil), out...)
-		s.setPollOut(c, true)
-	}
-}
-
-func (s *server) flush(c *conn) {
-	for len(c.out) > 0 {
-		n, err := syscall.Write(int(c.fd), c.out)
-		if err == syscall.EINTR {
-			continue
-		}
-		if err == syscall.EAGAIN {
-			return
-		}
-		if err != nil {
-			s.close(c)
-			return
-		}
-		c.out = c.out[n:]
-	}
-	c.out = nil
-	if c.pollOut {
-		s.setPollOut(c, false)
-	}
-	if c.closeAfter && !c.blocked {
+	if c.open && c.closeAfter && !c.blocked && !s.io.outPending(c) {
 		s.close(c)
 	}
 }
@@ -460,7 +349,7 @@ func (s *server) createPost(c *conn, r *request, out []byte, mode int) []byte {
 	if utf8.RuneCountInString(body) > 500 {
 		return appendResponse(out, 400, errBodyTooLong, mode)
 	}
-	s.ops = append(s.ops, writeOp{fd: c.fd, gen: c.gen, create: true, userID: userID,
+	s.ops = append(s.ops, writeOp{id: c.id, gen: c.gen, create: true, userID: userID,
 		body: body, author: username, connMode: mode})
 	c.blocked = true
 	return out
@@ -478,7 +367,7 @@ func (s *server) like(c *conn, r *request, rawID []byte, out []byte, mode int) [
 	case tooBig:
 		return appendResponse(out, 404, errPostNotFound, mode)
 	}
-	s.ops = append(s.ops, writeOp{fd: c.fd, gen: c.gen, userID: userID, postID: postID, connMode: mode})
+	s.ops = append(s.ops, writeOp{id: c.id, gen: c.gen, userID: userID, postID: postID, connMode: mode})
 	c.blocked = true
 	return out
 }
@@ -546,7 +435,7 @@ func (s *server) commit() {
 		if !ok {
 			op.status = 500
 		}
-		c := &s.conns[op.fd]
+		c := &s.conns[op.id]
 		if !c.open || c.gen != op.gen {
 			continue // the client left; its write is committed anyway
 		}
@@ -571,7 +460,7 @@ func (s *server) commit() {
 		switch {
 		case !c.open:
 		case c.closeAfter:
-			if len(c.out) == 0 {
+			if !s.io.outPending(c) {
 				s.close(c)
 			}
 		case len(c.in) > 0 && bytes.Contains(c.in, crlfcrlf):

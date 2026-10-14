@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
-# Runs once as root on a clean Ubuntu 24.04: a C compiler (for cgo and SQLite) and Go 1.27.2.
+# Runs once as root on a clean Ubuntu 24.04: a C compiler and liburing (for cgo, SQLite and
+# io_uring) and Go 1.27.2.
 set -euo pipefail
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y --no-install-recommends build-essential ca-certificates curl unzip
+apt-get install -y --no-install-recommends build-essential ca-certificates curl unzip liburing-dev
 
 GO_VERSION=1.27.2
 case "$(uname -m)" in
