@@ -142,7 +142,12 @@ final class Server {
         Conn c = lruHead;
         while (c != null && conns > target) {
             Conn next = c.next;
-            if (c.pending == null && !c.deferred && c.left == null) close(c);
+            if (c.pending == null && !c.deferred && c.left == null) {
+                // Abortive close: with SO_LINGER 0 the JDK skips shutdown(SHUT_WR), and the deferred close sends
+                // RST instead of FIN, so an evicted idle connection costs no FIN exchange and leaves no TIME_WAIT.
+                try { c.ch.setOption(StandardSocketOptions.SO_LINGER, 0); } catch (IOException ignored) { }
+                close(c);
+            }
             c = next;
         }
     }

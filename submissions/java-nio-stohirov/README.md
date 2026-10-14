@@ -31,6 +31,10 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Past the descriptor limit: idle eviction.** Connections sit in an LRU list. Near the `LimitNOFILE` limit,
   the server closes the longest-idle connections that have nothing in flight, so `accept` never fails with
   `EMFILE`. A client that was evicted while idle just reconnects on its next request.
+- **Evictions reset instead of closing gracefully.** An evicted connection gets `SO_LINGER=0` first. The JDK
+  then skips the `shutdown(SHUT_WR)` it otherwise sends for a channel still registered with the selector, and
+  the close sends RST: no FIN exchange and no TIME_WAIT. Past ~64k users nearly every request reconnects, and
+  this cut p99 at 320k simulated users from 524 ms to 160 ms.
 - **Adaptive wake-up batching.** When a wake-up brought fewer than 32 events, the loop parks for 2 ms so
   the next `epoll_wait` returns many at once. With ~0.1 req/s per user, most wake-ups would otherwise
   carry a single request. This saves about 10% of CPU for about 2 ms of latency. Busy wake-ups don't
@@ -38,9 +42,12 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 - **Explicit accept backlog** of 4096 (the JDK default is 50).
 
 **SQLite**
-- **JSON built in SQL.** Each read returns the whole response body as one TEXT column. A feed costs one
-  `sqlite3_step`, one `column_text` and one native-to-native `memcpy` into the response buffer: no Java
-  strings, no per-column calls, no escaping in Java.
+- **JSON built in SQL.** Each post object comes out of SQLite as one TEXT column (`json_object`), copied
+  native-to-native into the response buffer: no Java strings, no per-column calls, no escaping in Java.
+- **Feed rows are joined in Java, not by `json_group_array`.** The feed returns one row per post in index
+  order, and Java writes `{"posts":[`, the commas and `]}` around them. Aggregating in SQL needed
+  `json_group_array(… ORDER BY …)`, which builds a temporary sort b-tree on every call and copies the JSON
+  twice more. Splitting it cut the feed query from ~13.9 µs to ~9.7 µs and server CPU per request by ~14%.
 - **FFM instead of JDBC.** Statements are prepared once (`SQLITE_PREPARE_PERSISTENT`) and reused.
   Short calls (bind, column, changes) are `Linker.Option.critical` downcalls.
 - **`SQLITE_ENABLE_QPSG`.** Without it, the `GET /posts/:id` statement (`p.id = ?1` plus a correlated count)

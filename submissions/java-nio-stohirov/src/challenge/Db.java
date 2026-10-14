@@ -22,13 +22,11 @@ final class Db {
             json_object('id',p.id,'body',p.body,'created_at',p.created_at,'author',u.username,
                         'like_count',(SELECT count(*) FROM likes l WHERE l.post_id = p.id))""";
 
-    private static final String FEED_SQL = """
-            SELECT json_object('posts', json_group_array(json_object('id',id,'body',body,'created_at',created_at,
-                   'author',username,'like_count',like_count) ORDER BY created_at DESC, id DESC))
-              FROM (SELECT p.id, p.body, p.created_at, u.username,
-                           (SELECT count(*) FROM likes l WHERE l.post_id = p.id) AS like_count
-                      FROM posts p JOIN users u ON u.id = p.user_id
-                     ORDER BY p.created_at DESC, p.id DESC LIMIT 20)""";
+    private static final String FEED_SQL = "SELECT " + POST_JSON
+            + " FROM posts p JOIN users u ON u.id = p.user_id ORDER BY p.created_at DESC, p.id DESC LIMIT 20";
+
+    private static final byte[] FEED_OPEN = Out.ascii("{\"posts\":["), FEED_CLOSE = Out.ascii("]}");
+    private static final byte[] COMMA = {','};
 
     private static final String POST_SQL = "SELECT json_object('post', " + POST_JSON + ")"
             + " FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?1";
@@ -46,6 +44,7 @@ final class Db {
     private final MemorySegment db;
     private final MemorySegment feed, post, insertPost, like, exists, ping, begin, commit, rollback;
     private final MemorySegment scratch = Arena.global().allocate(64 * 1024);
+    private final Out feedBody = new Out(64 * 1024);
 
     private boolean inTxn;
     private int unchecked;
@@ -115,7 +114,22 @@ final class Db {
     }
 
     void feed(Out out) {
-        if (!jsonRow(feed, out, Out.S200)) throw new IllegalStateException("feed returned no row");
+        Out b = feedBody;
+        b.pos = 0;
+        b.put(FEED_OPEN);
+        try {
+            int rc;
+            while ((rc = Sqlite.step(feed)) == Sqlite.ROW) {
+                if (b.pos > FEED_OPEN.length) b.put(COMMA);
+                b.copyNative(Sqlite.columnText(feed, 0), Sqlite.columnBytes(feed, 0));
+            }
+            if (rc != Sqlite.DONE) throw error(rc);
+        } finally {
+            Sqlite.reset(feed);
+        }
+        b.put(FEED_CLOSE);
+        out.head(Out.S200, b.pos);
+        out.copyNative(b.seg, b.pos);
     }
 
     boolean post(long id, Out out) {
