@@ -28,6 +28,8 @@ parser.add_argument('--server-arg', action='append', default=[])
 parser.add_argument('--generator-memory', default='48g')
 parser.add_argument('--generator-procs', type=int, help='optional k6 Go runtime parallelism; not server affinity')
 parser.add_argument('--generator-gc-trace', action='store_true', help='diagnostic Go GC timings in generator log')
+parser.add_argument('--generator-gogc', type=int, help='optional GOGC setting for controlled k6 comparisons')
+parser.add_argument('--generator-memory-limit', help='optional GOMEMLIMIT value, for example 44GiB')
 parser.add_argument('--isolated-network', action='store_true',
                     help='share a private loopback namespace, avoiding host conntrack exhaustion')
 args = parser.parse_args()
@@ -63,6 +65,8 @@ def load(label, vus, hold, ramp):
             '-e', f'DURATION={hold}', '-e', f'RAMP_UP={ramp}',
             *(['-e', f'GOMAXPROCS={args.generator_procs}'] if args.generator_procs is not None else []),
             *(['-e', 'GODEBUG=gctrace=1'] if args.generator_gc_trace else []),
+            *(['-e', f'GOGC={args.generator_gogc}'] if args.generator_gogc is not None else []),
+            *(['-e', f'GOMEMLIMIT={args.generator_memory_limit}'] if args.generator_memory_limit else []),
             'grafana/k6:1.4.2', 'run', '--quiet', '--local-ips=127.0.0.2-127.0.0.17',
             f'--summary-export=/out/{label}.json', '/work/bench/load.js'
         ], stdout=log, stderr=subprocess.STDOUT)
@@ -103,6 +107,7 @@ def load(label, vus, hold, ramp):
             resources = {'samples': samples, 'state': generator_state, 'exit_code': process.returncode,
                          'memory_limit': args.generator_memory, 'generator': 'grafana/k6:1.4.2',
                          'gomaxprocs': args.generator_procs, 'gc_trace': args.generator_gc_trace,
+                         'gogc': args.generator_gogc, 'gomemlimit': args.generator_memory_limit,
                          'boundary': 'Same-host generator outside server quota; sampled resources are diagnostic.'}
             (out / f'{label}-generator.json').write_text(json.dumps(resources, indent=2) + '\n')
             subprocess.run(['docker', 'rm', '-f', f'{name}-load'], capture_output=True)
@@ -166,12 +171,17 @@ try:
     healthy_seconds = time.monotonic() - startup_started
     if healthy_seconds > 60:
         raise RuntimeError('server exceeded the 60-second startup gate')
+    build_identity = json.loads(command(['docker', 'exec', name, 'cat', '/app/build/identity.json'], capture_output=True).stdout)
+    workspace_source_sha256 = {
+        str(p.relative_to(here)): hashlib.sha256(p.read_bytes()).hexdigest()
+        for p in sorted((here / 'src').glob('*'))
+    }
     evidence = {
         'vus': args.vus, 'hold': args.hold, 'ramp': args.ramp, 'warmup': args.warmup,
         'image': command(['docker', 'inspect', '--format', '{{.Image}}', name], capture_output=True).stdout.strip(),
-        'source_sha256': {str(p.relative_to(here)): hashlib.sha256(p.read_bytes()).hexdigest()
-                          for p in sorted((here / 'src').glob('*'))},
-        'build_identity': json.loads(command(['docker', 'exec', name, 'cat', '/app/build/identity.json'], capture_output=True).stdout),
+        'source_sha256': build_identity.get('source_sha256', workspace_source_sha256),
+        'workspace_source_sha256': workspace_source_sha256,
+        'build_identity': build_identity,
         'runtime_binary_sha256': command(['docker', 'exec', name, 'sha256sum', args.binary_path], capture_output=True).stdout.split()[0],
         'runtime_binary_path': args.binary_path, 'start_script_mode': args.start_script,
         'healthy_seconds': healthy_seconds, 'probe_image': args.probe_image,
@@ -183,9 +193,10 @@ try:
         'server_cpu_quota': 1, 'server_memory_bytes': 2147483648, 'server_swap_bytes': 0,
         'nofile': 65535, 'network': 'private-shared-loopback' if args.isolated_network else 'host',
         'generator': 'grafana/k6:1.4.2', 'generator_procs': args.generator_procs, 'generator_gc_trace': args.generator_gc_trace,
+        'generator_gogc': args.generator_gogc, 'generator_memory_limit': args.generator_memory_limit,
         'source_addresses': '127.0.0.2-127.0.0.17',
     }
-    evidence['source_sha256'] = evidence['build_identity']['source_sha256']
+    evidence['source_sha256'] = evidence['build_identity'].get('source_sha256', evidence['workspace_source_sha256'])
     server_pid = int(command(['docker','inspect','--format','{{.State.Pid}}',name],capture_output=True).stdout)
     membership = Path(f'/proc/{server_pid}/cgroup').read_text()
     relative = next(line[3:] for line in membership.splitlines() if line.startswith('0::'))
