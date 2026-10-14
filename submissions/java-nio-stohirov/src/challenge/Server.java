@@ -19,6 +19,10 @@ final class Server {
     private static final int OUT_RESERVE = 64 * 1024;
     private static final long CHECKPOINT_NANOS = 1_000_000_000L;
     private static final int MAX_EVENTS = 4096;
+    // Descriptors kept free for the process itself (it uses about 15), and how many idle connections
+    // one eviction closes. Eviction starts only this close to the limit, so it never starts below the
+    // point where the kernel's connection tracking (65,536 entries on a 2 GB box) is full anyway.
+    private static final int FD_RESERVE = 128, EVICT_BATCH = 64;
 
     private static final int NOT_FOUND = 0, HEALTH = 1, FEED = 2, GET_POST = 3, CREATE = 4, LIKE = 5;
 
@@ -63,14 +67,13 @@ final class Server {
 
     private Conn lruHead, lruTail;
     private int conns;
-    private final int maxConns, evictTo;
+    private final int maxConns;
     private long lastCheckpoint = System.nanoTime();
 
     Server(Db db, Jwt jwt, String host, int port, long maxFds) throws IOException {
         this.db = db;
         this.jwt = jwt;
-        maxConns = (int) Math.max(64, Math.min(Integer.MAX_VALUE, maxFds) - 1024);
-        evictTo = maxConns - Math.max(16, Math.min(1000, maxConns / 10));
+        maxConns = (int) Math.max(2 * EVICT_BATCH, Math.min(Integer.MAX_VALUE, maxFds) - FD_RESERVE);
         ep = Sys.epollCreate();
         listenFd = Sys.listen(InetAddress.getByName(host), port, 4096);
         Sys.epollCtl(ep, Sys.EPOLL_CTL_ADD, listenFd, Sys.EPOLLIN);
@@ -118,11 +121,12 @@ final class Server {
 
     private void accept() {
         for (int n = 0; n < 512; n++) {
+            if (conns >= maxConns) evict(maxConns - EVICT_BATCH);
             int fd = Sys.accept(listenFd);
             if (fd < 0) {
                 int e = Sys.errno();
                 if (e == Sys.EINTR || e == Sys.ECONNABORTED) continue;
-                if (e == Sys.EMFILE || e == Sys.ENFILE) evict(Math.max(0, conns - 1000));
+                if (e == Sys.EMFILE || e == Sys.ENFILE) evict(Math.max(0, conns - EVICT_BATCH));
                 else if (e != Sys.EAGAIN) System.err.println("accept: errno " + e);
                 return;
             }
@@ -137,7 +141,6 @@ final class Server {
             linkTail(c);
             conns++;
         }
-        if (conns > maxConns) evict(evictTo);
     }
 
     private void evict(int target) {

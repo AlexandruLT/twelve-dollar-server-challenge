@@ -36,9 +36,12 @@ The server runs on Linux only (it calls `epoll` directly).
   didn't take yet. 256,000 open connections leave about 10 MB of live heap.
 - **Direct, no Nginx.** Nginx would take CPU from the one core, and `worker_connections 16384` caps it at
   about 16k users.
-- **Past the descriptor limit: idle eviction.** Connections sit in an LRU list. Near the `LimitNOFILE` limit,
-  the server closes the longest-idle connections that have nothing in flight, so `accept` never fails with
-  `EMFILE`. A client that was evicted while idle just reconnects on its next request.
+- **Past the descriptor limit: idle eviction.** Connections sit in an LRU list. Within 128 descriptors of the
+  `LimitNOFILE` limit (65,407 connections at 65,535), the server closes the 64 longest-idle connections that
+  have nothing in flight, so `accept` never fails with `EMFILE`. A client that was evicted while idle just
+  reconnects on its next request. Eviction starts this late on purpose: on a 2 GB box the kernel's connection
+  tracking table (65,536 entries) is full at about the same point, and evicting below it would only churn
+  connections that other servers simply keep.
 - **Evictions reset instead of closing gracefully.** An evicted connection gets `SO_LINGER=0` before `close()`,
   so the close sends RST: no FIN exchange and no TIME_WAIT. Past ~64k users nearly every request reconnects.
 - **Adaptive wake-up batching.** When a wake-up brought fewer than 32 events, the loop parks for 2 ms so
