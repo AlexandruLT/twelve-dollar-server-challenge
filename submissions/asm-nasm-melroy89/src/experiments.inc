@@ -1,10 +1,12 @@
 ; SPDX-License-Identifier: MIT
 ; Diagnostic CLI controls do not add runtime environment variables.
 section .rodata
-feed_prefix: db '{"posts":[',0
-single_prefix: db '{"post":',0
-id_prefix: db '{"id":',0
-likes_prefix: db ',"like_count":',0
+LITERAL feed_prefix
+LITERAL single_prefix
+LITERAL id_prefix
+LITERAL likes_prefix
+arg_literal_scalar: db '--literal-copy=scalar',0
+arg_literal_inline: db '--literal-copy=inline',0
 arg_batch_1: db '--batch=1',0
 arg_batch_32: db '--batch=32',0
 arg_batch_64: db '--batch=64',0
@@ -40,6 +42,7 @@ arg_json_nasm: db '--json=nasm',0
 arg_json_hybrid: db '--json=hybrid',0
 arg_eight_rings: db '--rings=8',0
 section .data
+literal_copy_inline: dd 0
 requested_rings: dd 8
 transaction_mode: dd 2
 completion_target: dd 32
@@ -103,6 +106,8 @@ parse_cli:
 .done: LEAVE
 section .data
 option_table:
+ dq arg_literal_scalar,literal_copy_inline,0
+ dq arg_literal_inline,literal_copy_inline,1
  dq arg_epoll,force_epoll,1
  dq arg_request,transaction_mode,0
  dq arg_writes,transaction_mode,1

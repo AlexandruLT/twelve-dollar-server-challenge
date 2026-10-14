@@ -96,6 +96,7 @@ bin/server --query=selected --json=nasm
 bin/server --query=range --json=hybrid
 bin/server --query=scan-ranges
 bin/server --savepoints=on
+bin/server --literal-copy=inline
 bin/server --recv=multi --batch=32 --wait-us=250
 bin/server --rings=1 --nodelay=on
 ```
@@ -120,6 +121,9 @@ gain was small and noisy. Individual contributions and the best final defaults
 remain under investigation. A multishot receive screen improved saturation CPU
 throughput but failed the 275k p99 threshold; one-shot remains the default.
 The bounded three-query range experiment was slower and remains opt-in.
+`--literal-copy=inline` selects fixed-width NASM copies for known response
+fragments; scalar remains the default because unchanged-k6 screens did not show
+a repeatable gain. See `research/literal-copy-results.md` for the measurements.
 
 ## Validation
 

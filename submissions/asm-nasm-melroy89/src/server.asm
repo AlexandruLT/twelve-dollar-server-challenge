@@ -23,10 +23,7 @@ default rel
  pop rbp
  ret
 %endmacro
-%macro APPEND 1
- lea rsi,[%1]
- call append_z
-%endmacro
+%include "literals.inc"
 extern sqlite3_open_v2,sqlite3_prepare_v3,sqlite3_step,sqlite3_reset,sqlite3_finalize
 extern sqlite3_column_text,sqlite3_column_bytes,sqlite3_column_int64,sqlite3_bind_int64,sqlite3_bind_text
 extern sqlite3_close,sqlite3_errmsg,sqlite3_exec,sqlite3_changes,sqlite3_get_autocommit,sqlite3_wal_hook,sqlite3_wal_checkpoint_v2
@@ -70,7 +67,7 @@ status_404: db 'HTTP/1.1 404 Not Found',13,10,0
 status_413: db 'HTTP/1.1 413 Payload Too Large',13,10,0
 status_500: db 'HTTP/1.1 500 Internal Server Error',13,10,0
 status_503: db 'HTTP/1.1 503 Service Unavailable',13,10,0
-content_header: db 'Content-Type: application/json',13,10,'Content-Length: ',0
+LITERAL content_header
 keep_header: db 13,10,'Connection: keep-alive',13,10,13,10,0
 close_header: db 13,10,'Connection: close',13,10,13,10,0
 err_notfound: db '{"error":"not found"}',0
@@ -85,12 +82,12 @@ err_long: db '{"error":"body must be at most 500 characters"}',0
 err_internal: db '{"error":"internal server error"}',0
 err_busy: db '{"error":"server busy"}',0
 err_health: db '{"status":"degraded","db":"unreachable","error":"SQLite SELECT 1 failed"}',0
-health_prefix: db '{"status":"ok","db":"ok","uptime_s":',0
-post_prefix: db '{"post":{"id":',0
-body_prefix: db ',"body":',0
-created_prefix: db ',"created_at":',0
-author_prefix: db ',"author":',0
-post_end: db ',"like_count":0}}',0
+LITERAL health_prefix
+LITERAL post_prefix
+LITERAL body_prefix
+LITERAL created_prefix
+LITERAL author_prefix
+LITERAL post_end
 like_first: db '{"liked":true,"already_liked":false,"post_id":',0
 like_repeat: db '{"liked":true,"already_liked":true,"post_id":',0
 section .data
