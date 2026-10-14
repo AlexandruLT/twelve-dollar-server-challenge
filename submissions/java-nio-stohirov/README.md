@@ -1,9 +1,9 @@
-# Java + its own NIO event loop
+# Java + its own epoll event loop
 
 | | |
 |---|---|
 | Language | Java 25: Eclipse Temurin `jdk-25.0.4.1+1`, official tarball, sha256-pinned in `install.sh` |
-| Framework | None. A hand-written HTTP/1.1 server on `java.nio` (one `Selector`, epoll on Linux) |
+| Framework | None. A hand-written HTTP/1.1 server on Linux `epoll`, called through FFM (no `java.nio` channels) |
 | SQLite driver | No JDBC. Direct FFM (`java.lang.foreign`) bindings to SQLite **3.54.0**, compiled from the amalgamation by `build.sh` (sha256-pinned) |
 | JSON | Responses are built by SQLite (`json_object` / `json_group_array`); a small strict parser reads request bodies and JWTs |
 | Dependencies | Zero Java dependencies. `build.sh` needs only `cc` and the JDK |
@@ -17,29 +17,35 @@ bash build.sh          # SQLite -> build/libsqlite3.so, sources -> build/server.
 SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 ```
 
+The server runs on Linux only (it calls `epoll` directly).
+
 ## Optimizations, and why
 
 **Process and I/O**
 - **One thread, one SQLite connection, everything inline.** On one vCPU, more threads only add context
   switches. Every query is an index lookup that takes microseconds, so the event loop calls SQLite
   directly.
-- **No buffers while idle.** Each connection is a small object. One shared direct read buffer and one shared
-  response buffer serve every connection. A connection gets its own buffer only while it holds a partial
-  request or a response the socket didn't take yet. 60,000 open connections cost about 40 MB of heap.
+- **Sockets and epoll through FFM, not `java.nio`.** `accept4`, `epoll_wait`/`epoll_ctl`, `read`, `write` and
+  `close` are FFM downcalls, the same way SQLite is called. `SocketChannel` and `Selector` added work on every
+  connection: `fcntl` calls to make it non-blocking, two `getsockname` calls on accept, deferred deregistration
+  and close in the selector, and several objects and locks per connection. A connection is now an `int` fd in a
+  small object, and `close()` also removes it from the epoll set. At 256k simulated users this cut server CPU
+  from 64% to 56% and moved the local ceiling from about 330k to about 390k users.
+- **No buffers while idle.** One shared native read buffer and one shared response buffer serve every
+  connection. A connection gets its own buffer only while it holds a partial request or a response the socket
+  didn't take yet. 256,000 open connections leave about 10 MB of live heap.
 - **Direct, no Nginx.** Nginx would take CPU from the one core, and `worker_connections 16384` caps it at
   about 16k users.
 - **Past the descriptor limit: idle eviction.** Connections sit in an LRU list. Near the `LimitNOFILE` limit,
   the server closes the longest-idle connections that have nothing in flight, so `accept` never fails with
   `EMFILE`. A client that was evicted while idle just reconnects on its next request.
-- **Evictions reset instead of closing gracefully.** An evicted connection gets `SO_LINGER=0` first. The JDK
-  then skips the `shutdown(SHUT_WR)` it otherwise sends for a channel still registered with the selector, and
-  the close sends RST: no FIN exchange and no TIME_WAIT. Past ~64k users nearly every request reconnects, and
-  this cut p99 at 320k simulated users from 524 ms to 160 ms.
+- **Evictions reset instead of closing gracefully.** An evicted connection gets `SO_LINGER=0` before `close()`,
+  so the close sends RST: no FIN exchange and no TIME_WAIT. Past ~64k users nearly every request reconnects.
 - **Adaptive wake-up batching.** When a wake-up brought fewer than 32 events, the loop parks for 2 ms so
   the next `epoll_wait` returns many at once. With ~0.1 req/s per user, most wake-ups would otherwise
   carry a single request. This saves about 10% of CPU for about 2 ms of latency. Busy wake-ups don't
   park, so the pause never caps throughput.
-- **Explicit accept backlog** of 4096 (the JDK default is 50).
+- **Listen backlog** of 4096.
 
 **SQLite**
 - **JSON built in SQL.** Each post object comes out of SQLite as one TEXT column (`json_object`), copied
@@ -80,15 +86,19 @@ SQLITE_PATH=... JWT_SECRET=... HOST=0.0.0.0 PORT=80 bash start.sh
 
 ## Local measurements
 
-These were measured on Docker on an Apple Silicon laptop, not the droplet. The server container was
-limited to `--cpus=1 --memory=2g` with `nofile=65535`. Load came from separate containers replaying
-`bench/load.js`'s user loop with one keep-alive connection per user.
+These were measured on Docker on an Apple Silicon laptop, not the droplet. The server was pinned to one core
+with `--cpus 1 --memory 2g`, no swap and `nofile=65535`. Load came from a load generator replaying
+`bench/load.js`'s user loop with one keep-alive connection per user, with k6's rules for latency, timeouts and
+retries. Each level was a 60 s ramp and a 2-minute hold.
 
 | Users | req/s | p95 | p99 | Errors | Server CPU |
 |---|---|---|---|---|---|
-| 10,000 (k6) | ~1,050 | 3.5 ms | 5.1 ms | 0 | ~8% |
-| 60,000 | ~6,350 | 4.5 ms | 15 ms | 0 | ~30% |
-| 80,000 (eviction active) | ~8,470 | 15 ms | 24 ms | 0.03% | ~33% |
+| 128,000 | 13,543 | 11 ms | 28 ms | 0.011% | 31% |
+| 256,000 | 27,086 | 38 ms | 55 ms | 0.0013% | 56% |
+| 320,000 | 33,808 | 57 ms | 68 ms | 0.0009% | 69% |
+| 352,000 | 37,106 | 90 ms | 127 ms | 0.0006% | 76% |
+| 384,000 | 40,578 | 119 ms | 176 ms | 0.0075% | 78% |
+| 416,000 | fails: the core saturates at ~40k req/s | | 6.7 s | 0.34% | 82% |
 
 ## License
 

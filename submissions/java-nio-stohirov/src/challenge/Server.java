@@ -1,14 +1,11 @@
 package challenge;
 
+import static java.lang.foreign.ValueLayout.JAVA_BYTE;
+
 import java.io.IOException;
-import java.net.InetSocketAddress;
-import java.net.StandardSocketOptions;
-import java.nio.ByteBuffer;
-import java.nio.channels.CancelledKeyException;
-import java.nio.channels.SelectionKey;
-import java.nio.channels.Selector;
-import java.nio.channels.ServerSocketChannel;
-import java.nio.channels.SocketChannel;
+import java.lang.foreign.Arena;
+import java.lang.foreign.MemorySegment;
+import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -21,6 +18,7 @@ final class Server {
     private static final int OUT_CAP = 1 << 20;
     private static final int OUT_RESERVE = 64 * 1024;
     private static final long CHECKPOINT_NANOS = 1_000_000_000L;
+    private static final int MAX_EVENTS = 4096;
 
     private static final int NOT_FOUND = 0, HEALTH = 1, FEED = 2, GET_POST = 3, CREATE = 4, LIKE = 5;
 
@@ -37,26 +35,28 @@ final class Server {
     private static byte[] err(String message) { return Out.ascii("{\"error\":\"" + message + "\"}"); }
 
     static final class Conn {
-        final SocketChannel ch;
-        SelectionKey key;
+        final int fd;
         byte[] left;
-        ByteBuffer pending;
+        byte[] pending;     // response bytes the socket didn't take yet, from pendingFrom on
+        int pendingFrom;
         boolean deferred;
         boolean closeAfterWrite, closed;
         Conn prev, next;
 
-        Conn(SocketChannel ch) { this.ch = ch; }
+        Conn(int fd) { this.fd = fd; }
     }
 
     private final Db db;
     private final Jwt jwt;
-    private final Selector selector;
-    private final ServerSocketChannel server;
+    private final int ep, listenFd;
     private final long startNanos = System.nanoTime();
 
-    private final ByteBuffer in = ByteBuffer.allocateDirect(READ_CAP);
+    private final MemorySegment events = Arena.global().allocate((long) MAX_EVENTS * Sys.EVENT_SIZE, 8);
+    private final MemorySegment in = Arena.global().allocate(READ_CAP);
+    private final MemorySegment wbuf = Arena.global().allocate(OUT_CAP);
     private final byte[] rb = new byte[READ_CAP + MAX_HEAD + MAX_BODY];
     private final Out out = new Out(OUT_CAP);
+    private Conn[] byFd = new Conn[1024];
 
     private final ArrayList<Conn> queue = new ArrayList<>(), batch = new ArrayList<>();
     private int[] sliceFrom = new int[64], sliceTo = new int[64];
@@ -71,19 +71,21 @@ final class Server {
         this.jwt = jwt;
         maxConns = (int) Math.max(64, Math.min(Integer.MAX_VALUE, maxFds) - 1024);
         evictTo = maxConns - Math.max(16, Math.min(1000, maxConns / 10));
-        selector = Selector.open();
-        server = ServerSocketChannel.open();
-        server.setOption(StandardSocketOptions.SO_REUSEADDR, true);
-        server.bind(new InetSocketAddress(host, port), 4096);
-        server.configureBlocking(false);
-        server.register(selector, SelectionKey.OP_ACCEPT, null);
+        ep = Sys.epollCreate();
+        listenFd = Sys.listen(InetAddress.getByName(host), port, 4096);
+        Sys.epollCtl(ep, Sys.EPOLL_CTL_ADD, listenFd, Sys.EPOLLIN);
     }
 
-    void run() throws IOException {
+    void run() {
         long batchNanos = Long.getLong("batch.micros", 2000) * 1000;
         int batchMin = Integer.getInteger("batch.min", 32);
         while (true) {
-            int n = selector.select(this::onKey, 1000);
+            int n = Sys.epollWait(ep, events, MAX_EVENTS, 1000);
+            if (n < 0) {
+                if (Sys.errno() != Sys.EINTR) throw new IllegalStateException("epoll_wait: errno " + Sys.errno());
+                n = 0;
+            }
+            for (int i = 0; i < n; i++) onEvent(Sys.eventFd(events, i), Sys.eventFlags(events, i));
             commitPhase();
             long now = System.nanoTime();
             if (now - lastCheckpoint >= CHECKPOINT_NANOS) {
@@ -94,19 +96,20 @@ final class Server {
         }
     }
 
-    private void onKey(SelectionKey k) {
-        Object a = k.attachment();
-        if (a == null) {
+    private void onEvent(int fd, int flags) {
+        if (fd == listenFd) {
             accept();
             return;
         }
-        Conn c = (Conn) a;
+        // An event can be stale: its fd was closed earlier in this batch, and maybe reused by an accept.
+        Conn c = fd < byFd.length ? byFd[fd] : null;
+        if (c == null) return;
         try {
-            int ready = k.readyOps();
-            if ((ready & SelectionKey.OP_WRITE) != 0) onWritable(c);
-            if (!c.closed && (ready & SelectionKey.OP_READ) != 0 && c.pending == null) onReadable(c);
-        } catch (CancelledKeyException e) {
-            close(c);
+            if (c.pending != null) {
+                if ((flags & (Sys.EPOLLOUT | Sys.EPOLLERR | Sys.EPOLLHUP)) != 0) onWritable(c);
+            } else if ((flags & (Sys.EPOLLIN | Sys.EPOLLERR | Sys.EPOLLHUP)) != 0) {
+                onReadable(c);
+            }
         } catch (Throwable t) {
             System.err.println("connection error: " + t);
             close(c);
@@ -115,23 +118,22 @@ final class Server {
 
     private void accept() {
         for (int n = 0; n < 512; n++) {
-            SocketChannel ch;
-            try {
-                ch = server.accept();
-            } catch (IOException e) {
-                evict(Math.max(0, conns - 1000));
+            int fd = Sys.accept(listenFd);
+            if (fd < 0) {
+                int e = Sys.errno();
+                if (e == Sys.EINTR || e == Sys.ECONNABORTED) continue;
+                if (e == Sys.EMFILE || e == Sys.ENFILE) evict(Math.max(0, conns - 1000));
+                else if (e != Sys.EAGAIN) System.err.println("accept: errno " + e);
                 return;
             }
-            if (ch == null) break;
-            Conn c = new Conn(ch);
-            try {
-                ch.configureBlocking(false);
-                ch.setOption(StandardSocketOptions.TCP_NODELAY, true);
-                c.key = ch.register(selector, SelectionKey.OP_READ, c);
-            } catch (IOException e) {
-                try { ch.close(); } catch (IOException ignored) { }
+            Sys.setInt(fd, Sys.IPPROTO_TCP, Sys.TCP_NODELAY, 1);
+            if (Sys.epollCtl(ep, Sys.EPOLL_CTL_ADD, fd, Sys.EPOLLIN) != 0) {
+                Sys.close(fd);
                 continue;
             }
+            Conn c = new Conn(fd);
+            if (fd >= byFd.length) byFd = Arrays.copyOf(byFd, Math.max(fd + 1, byFd.length * 2));
+            byFd[fd] = c;
             linkTail(c);
             conns++;
         }
@@ -143,9 +145,9 @@ final class Server {
         while (c != null && conns > target) {
             Conn next = c.next;
             if (c.pending == null && !c.deferred && c.left == null) {
-                // Abortive close: with SO_LINGER 0 the JDK skips shutdown(SHUT_WR), and the deferred close sends
-                // RST instead of FIN, so an evicted idle connection costs no FIN exchange and leaves no TIME_WAIT.
-                try { c.ch.setOption(StandardSocketOptions.SO_LINGER, 0); } catch (IOException ignored) { }
+                // Abortive close: with SO_LINGER 0, close() resets the connection instead of sending FIN,
+                // so an evicted idle connection costs no FIN exchange and leaves no TIME_WAIT.
+                Sys.lingerZero(c.fd);
                 close(c);
             }
             c = next;
@@ -159,7 +161,8 @@ final class Server {
         conns--;
         c.left = null;
         c.pending = null;
-        try { c.ch.close(); } catch (IOException ignored) { }
+        byFd[c.fd] = null;
+        Sys.close(c.fd); // also removes it from the epoll set
     }
 
     private void linkTail(Conn c) {
@@ -181,29 +184,24 @@ final class Server {
         linkTail(c);
     }
 
-    private void onReadable(Conn c) throws IOException {
+    private static boolean retryable(int errno) { return errno == Sys.EAGAIN || errno == Sys.EINTR; }
+
+    private void onReadable(Conn c) {
         int have = c.left == null ? 0 : c.left.length;
         int room = Math.min(READ_CAP, rb.length - have);
         if (room <= 0) {
             close(c);
             return;
         }
-        in.clear().limit(room);
-        int n;
-        try {
-            n = c.ch.read(in);
-        } catch (IOException e) {
-            close(c);
+        long r = Sys.read(c.fd, in, room);
+        if (r <= 0) {
+            if (r == 0 || !retryable(Sys.errno())) close(c);
             return;
         }
-        if (n < 0) {
-            close(c);
-            return;
-        }
-        if (n == 0) return;
+        int n = (int) r;
         touch(c);
         if (have > 0) System.arraycopy(c.left, 0, rb, 0, have);
-        in.get(0, rb, have, n);
+        MemorySegment.copy(in, JAVA_BYTE, 0, rb, have, n);
         c.left = null;
         if (c.deferred) {
             c.left = Arrays.copyOf(rb, have + n);
@@ -212,21 +210,24 @@ final class Server {
         process(c, have + n, false);
     }
 
-    private void onWritable(Conn c) throws IOException {
-        ByteBuffer p = c.pending;
-        try {
-            c.ch.write(p);
-        } catch (IOException e) {
-            close(c);
+    private void onWritable(Conn c) {
+        byte[] p = c.pending;
+        int len = Math.min(p.length - c.pendingFrom, OUT_CAP);
+        MemorySegment.copy(p, c.pendingFrom, wbuf, JAVA_BYTE, 0, len);
+        long w = Sys.write(c.fd, wbuf, len);
+        if (w < 0) {
+            if (!retryable(Sys.errno())) close(c);
             return;
         }
-        if (p.hasRemaining()) return;
+        c.pendingFrom += (int) w;
+        if (c.pendingFrom < p.length) return;
         c.pending = null;
+        c.pendingFrom = 0;
         if (c.closeAfterWrite) {
             close(c);
             return;
         }
-        c.key.interestOps(SelectionKey.OP_READ);
+        Sys.epollCtl(ep, Sys.EPOLL_CTL_MOD, c.fd, Sys.EPOLLIN);
         resume(c);
     }
 
@@ -240,30 +241,32 @@ final class Server {
 
     private void send(Conn c, int from, int to) {
         if (c.closed || from == to) return;
-        ByteBuffer bb = out.buf;
-        bb.limit(to).position(from);
+        int len = to - from;
         if (c.pending != null) {
-            ByteBuffer p = ByteBuffer.allocate(c.pending.remaining() + bb.remaining());
-            p.put(c.pending).put(bb).flip();
+            int rest = c.pending.length - c.pendingFrom;
+            byte[] p = new byte[rest + len];
+            System.arraycopy(c.pending, c.pendingFrom, p, 0, rest);
+            MemorySegment.copy(out.seg, JAVA_BYTE, from, p, rest, len);
             c.pending = p;
-        } else {
-            try {
-                c.ch.write(bb);
-            } catch (IOException e) {
-                bb.clear();
-                close(c);
-                return;
-            }
-            if (bb.hasRemaining()) {
-                c.pending = ByteBuffer.allocate(bb.remaining()).put(bb).flip();
-                c.key.interestOps(SelectionKey.OP_WRITE);
-            } else if (c.closeAfterWrite) {
-                bb.clear();
-                close(c);
-                return;
-            }
+            c.pendingFrom = 0;
+            return;
         }
-        bb.clear();
+        long w = Sys.write(c.fd, out.seg.asSlice(from, len), len);
+        if (w < 0) {
+            if (!retryable(Sys.errno())) {
+                close(c);
+                return;
+            }
+            w = 0;
+        }
+        if (w < len) {
+            c.pending = new byte[len - (int) w];
+            MemorySegment.copy(out.seg, JAVA_BYTE, from + w, c.pending, 0, c.pending.length);
+            c.pendingFrom = 0;
+            Sys.epollCtl(ep, Sys.EPOLL_CTL_MOD, c.fd, Sys.EPOLLOUT);
+        } else if (c.closeAfterWrite) {
+            close(c);
+        }
     }
 
     private void commitPhase() {
