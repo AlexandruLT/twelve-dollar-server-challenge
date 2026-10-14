@@ -1,4 +1,5 @@
 #include "jwt.h"
+#include "json.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -183,9 +184,9 @@ static int find_field(const char *p, size_t n, const char *name,
     const char *ve = skip_val(vs, e);
     if (!ve) return -1;
     if (iskey) {
-      char t = *vs;
-      if (t == 't') t = 't'; else if (t == 'f') t = 'f'; else if (t == 'n') t = 'u';
-      else if (t != '"' && t != '{' && t != '[') t = 'n';
+      char t = *vs; // 't'/'f' pass through; null maps to 'u', anything else is a number
+      if (t == 'n') t = 'u';
+      else if (t != '"' && t != '{' && t != '[' && t != 't' && t != 'f') t = 'n';
       *val = vs; *vlen = (size_t)(ve - vs); *vt = t;
       return 0;
     }
@@ -194,70 +195,6 @@ static int find_field(const char *p, size_t n, const char *name,
     if (*p == ',') { p++; continue; }
     return -1;
   }
-}
-
-// Decode JSON string (val includes quotes) into out. Returns bytes or -1.
-static int hex4(const char *p, unsigned *v) {
-  unsigned r = 0;
-  for (int i = 0; i < 4; i++) {
-    char ch = p[i];
-    r <<= 4;
-    if (ch >= '0' && ch <= '9') r |= (unsigned)(ch - '0');
-    else if (ch >= 'a' && ch <= 'f') r |= (unsigned)(ch - 'a' + 10);
-    else if (ch >= 'A' && ch <= 'F') r |= (unsigned)(ch - 'A' + 10);
-    else return -1;
-  }
-  *v = r;
-  return 0;
-}
-static int utf8_enc(unsigned cp, char *o) {
-  if (cp < 0x80) { o[0] = (char)cp; return 1; }
-  if (cp < 0x800) { o[0] = (char)(0xC0 | (cp >> 6)); o[1] = (char)(0x80 | (cp & 63)); return 2; }
-  if (cp < 0x10000) { o[0] = (char)(0xE0 | (cp >> 12)); o[1] = (char)(0x80 | ((cp >> 6) & 63)); o[2] = (char)(0x80 | (cp & 63)); return 3; }
-  o[0] = (char)(0xF0 | (cp >> 18)); o[1] = (char)(0x80 | ((cp >> 12) & 63));
-  o[2] = (char)(0x80 | ((cp >> 6) & 63)); o[3] = (char)(0x80 | (cp & 63)); return 4;
-}
-static int json_unescape(const char *val, size_t vlen, char *out, size_t cap) {
-  // val[0]=='"', val[vlen-1]=='"'
-  size_t o = 0;
-  for (size_t i = 1; i + 1 < vlen; i++) {
-    char ch = val[i];
-    if (ch != '\\') {
-      if ((unsigned char)ch < 0x20) return -1;
-      if (o + 1 > cap) return -1;
-      out[o++] = ch;
-      continue;
-    }
-    if (++i >= vlen - 1) return -1;
-    char e = val[i], w;
-    switch (e) {
-      case '"': case '\\': case '/': w = e; if (o + 1 > cap) return -1; out[o++] = w; break;
-      case 'b': if (o + 1 > cap) return -1; out[o++] = '\b'; break;
-      case 'f': if (o + 1 > cap) return -1; out[o++] = '\f'; break;
-      case 'n': if (o + 1 > cap) return -1; out[o++] = '\n'; break;
-      case 'r': if (o + 1 > cap) return -1; out[o++] = '\r'; break;
-      case 't': if (o + 1 > cap) return -1; out[o++] = '\t'; break;
-      case 'u': {
-        unsigned cp;
-        if (i + 4 >= vlen || hex4(val + i + 1, &cp) != 0) return -1;
-        i += 4;
-        if (cp >= 0xD800 && cp <= 0xDBFF) { // surrogate pair
-          unsigned lo;
-          if (i + 6 >= vlen || val[i+1] != '\\' || val[i+2] != 'u' || hex4(val + i + 3, &lo) != 0) return -1;
-          if (lo < 0xDC00 || lo > 0xDFFF) return -1;
-          cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
-          i += 6;
-        } else if (cp >= 0xDC00 && cp <= 0xDFFF) return -1;
-        char tmp[4];
-        int k = utf8_enc(cp, tmp);
-        if (o + (size_t)k > cap) return -1;
-        memcpy(out + o, tmp, (size_t)k); o += (size_t)k;
-        break;
-      }
-      default: return -1;
-    }
-  }
-  return (int)o;
 }
 
 static int consttime_eq(const uint8_t *a, const uint8_t *b, size_t n) {
@@ -313,11 +250,10 @@ int jwt_verify(const char *tok, size_t tlen,
     char ch = v[i];
     if (ch == '\\') return JWT_BAD_PAYLOAD; // no escapes allowed in sub
     if (ch < '0' || ch > '9') return JWT_BAD_PAYLOAD;
-    digits++;
+    if (++digits > 16) return JWT_BAD_PAYLOAD; // 2^53 fits in 16 digits; longer cannot be valid
     uid = uid * 10 + (uint64_t)(ch - '0');
     if (uid > 9007199254740991ULL) return JWT_BAD_PAYLOAD; // beyond 2^53: out of scope, reject
   }
-  if (digits == 0 || (digits > 1 && v[1] == '0')) { /* leading zeros: allow? "007" is odd; be lenient */ }
   if (uid == 0) return JWT_BAD_PAYLOAD;
 
   // username: must be a string; decode escapes into scratch after payload
@@ -325,7 +261,7 @@ int jwt_verify(const char *tok, size_t tlen,
   size_t uname_off = (size_t)pnb;
   // ensure room: decoded <= vlen, fits if uname_off + vl <= scratch_cap
   if (uname_off + vl > scratch_cap) return JWT_BAD_TOKEN;
-  int unb = json_unescape(v, vl, praw + uname_off, scratch_cap - uname_off);
+  int unb = json_unescape(v + 1, vl - 2, praw + uname_off, scratch_cap - uname_off);
   if (unb < 0) return JWT_BAD_PAYLOAD;
 
   // exp: must be a JSON number and > now

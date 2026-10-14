@@ -89,7 +89,7 @@ static const char *number_end(const char *p, const char *e) {
 static const char *lit(const char *p, const char *e, const char *w) {
   size_t n = 0;
   while (w[n]) n++;
-  if ((size_t)(e - p) < n || __builtin_memcmp(p, w, n) != 0) return NULL;
+  if ((size_t)(e - p) < n || memcmp(p, w, n) != 0) return NULL;
   return p + n;
 }
 
@@ -163,8 +163,8 @@ static const char *value(const char *p, const char *e, int depth,
   return NULL;
 }
 
-// Shared unescape (same rules as jwt.c's copy; kept separate to avoid coupling).
-static int unesc(const char *s, size_t n, char *out, size_t cap) {
+int json_unescape(const char *val, size_t vlen, char *out, size_t cap) {
+  const char *s = val; size_t n = vlen;
   size_t o = 0;
   for (size_t i = 0; i < n; i++) {
     char ch = s[i];
@@ -225,7 +225,7 @@ int json_extract_body(const char *p, size_t n, char *out, size_t cap, size_t *bo
   if (!e) return JSON_MALFORMED;
   if (ws(e, p + n) != p + n) return JSON_MALFORMED; // trailing garbage
   if (!b) return JSON_NO_BODY;
-  int r = unesc(b, bl, out, cap);
+  int r = json_unescape(b, bl, out, cap);
   if (r < 0) return JSON_MALFORMED;
   *body_len = (size_t)r;
   return JSON_OK;
@@ -264,11 +264,11 @@ int utf8_count_chars(const char *s, size_t n, size_t *chars) {
     else if (ch >= 0xF0 && ch <= 0xF4) { need = 4; min = 0x10000; }
     else return -1;
     if (i + need > n) return -1;
-    unsigned cp = (unsigned)(ch & ((1u << (8 - (unsigned)need)) - 1u));
-    // mask table: for need=1 handled above; for multi-byte take low bits
-    if (need == 2) cp = (unsigned)(ch & 0x1F);
+    unsigned cp;
+    if (need == 1) cp = ch;
+    else if (need == 2) cp = (unsigned)(ch & 0x1F);
     else if (need == 3) cp = (unsigned)(ch & 0x0F);
-    else if (need == 4) cp = (unsigned)(ch & 0x07);
+    else cp = (unsigned)(ch & 0x07);
     for (size_t k = 1; k < need; k++) {
       unsigned char cc = (unsigned char)s[i + k];
       if ((cc & 0xC0) != 0x80) return -1;

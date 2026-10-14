@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# confirm.sh <total-vus> <dst-ip> [dst-ip...] — official README confirmation:
+# confirm.sh <total-vus> <dst-ip> [dst-ip...]: official README confirmation:
 # 2-min warmup @1000 VUs, 60s ramp, 5-min hold, 30s ramp-down (in load.js),
 # then pass/fail per p95<500ms, p99<1s, errors<1%.
 # Usage (on cachyos): bash dev/confirm.sh 70000 127.0.0.2 127.0.0.3 127.0.0.4

@@ -7,7 +7,6 @@
 
 #define CONN_KEEPALIVE_S 75   // idle keep-alive (SPEC needs >= 65 behind nginx)
 #define CONN_STALL_S     30   // no-progress with pending I/O -> close
-#define CONN_MAX_UNREAD  (64u * 1024u)  // stop reading past this much unsent
 #define WHEEL_BITS 8
 #define WHEEL_SIZE (1u << WHEEL_BITS)
 

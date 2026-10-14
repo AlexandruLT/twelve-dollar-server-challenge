@@ -50,7 +50,7 @@ static resp_t err(resp_t *r, char *dst, size_t cap, int status, const char *msg)
   char *p = dst;
   if (cap < 32) { r->status = 500; r->body = ""; r->body_len = 0; return *r; }
   size_t n = strlen(msg);
-  // {"error":"<msg>"} — messages are constant ASCII, no escaping needed
+  // {"error":"<msg>"}: messages are constant ASCII, no escaping needed
   memcpy(p, "{\"error\":\"", 10);
   memcpy(p + 10, msg, n);
   memcpy(p + 10 + n, "\"}", 2);
@@ -249,7 +249,9 @@ resp_t api_handle(api_t *a, const req_t *req) {
     if (db_begin(d) != 0)
       return err(&r, rb, rcap, 500, "internal server error");
     sqlite3_bind_int64(d->st_create, 1, (int64_t)auth.uid);
-    sqlite3_bind_text(d->st_create, 2, bbuf + s, (int)(e - s), SQLITE_TRANSIENT);
+    /* STATIC: bbuf lives in the request accumulator, which is freed only after
+       this handler returns; the step below consumes the text synchronously. */
+    sqlite3_bind_text(d->st_create, 2, bbuf + s, (int)(e - s), SQLITE_STATIC);
     int crc = sqlite3_step(d->st_create);
     sqlite3_reset(d->st_create);
     sqlite3_clear_bindings(d->st_create);

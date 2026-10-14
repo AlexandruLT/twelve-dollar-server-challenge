@@ -1,4 +1,4 @@
-// server.c — single-threaded epoll HTTP/1.1 + SQLite feed API.
+// server.c: single-threaded epoll HTTP/1.1 + SQLite feed API.
 // One loop iteration: epoll_wait -> accept/recv/parse/handle (build replies)
 // -> group-commit -> send. No response is sent before its commit.
 #define _GNU_SOURCE

@@ -8,13 +8,13 @@
 #include "jwt.h"
 
 // Scratch layout (single-threaded: one global buffer reused per request):
-// [0..2048) JWT decode | [2048..19456) request-body work | [19456..98304) response
+// [0..4096) JWT decode | [4096..21504) request-body work | [21504..98304) response
 #define API_SCRATCH (96u * 1024u)
-#define API_JWT_SCRATCH 2048
-#define API_BODY_OFF 2048
+#define API_JWT_SCRATCH 4096
+#define API_BODY_OFF 4096
 #define API_BODY_CAP (17u * 1024u)
-#define API_RESP_OFF (2048 + 17u * 1024u)
-#define API_RESP_CAP (96u * 1024u - (2048 + 17u * 1024u))
+#define API_RESP_OFF (4096 + 17u * 1024u)
+#define API_RESP_CAP (96u * 1024u - (4096 + 17u * 1024u))
 
 typedef struct {
   int status;            // HTTP status

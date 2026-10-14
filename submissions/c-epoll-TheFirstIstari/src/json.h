@@ -10,6 +10,10 @@ enum { JSON_OK = 0, JSON_MALFORMED = 1, JSON_NO_BODY = 2 };
 // or JSON_MALFORMED.
 int json_extract_body(const char *p, size_t n, char *out, size_t cap, size_t *body_len);
 
+// Decode a JSON string (val includes quotes) into out. Returns bytes written,
+// or -1 on invalid escapes. Shared by the JWT claim decoder.
+int json_unescape(const char *val, size_t vlen, char *out, size_t cap);
+
 // Escape s[0..n) as JSON string content (no quotes). Returns bytes written,
 // or -1 if it does not fit. Assumes valid UTF-8 (passes through >= 0x20,
 // escapes '"' '\\' and control chars as \u00XX).

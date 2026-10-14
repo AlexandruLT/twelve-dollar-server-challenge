@@ -59,10 +59,13 @@ int db_open(db_t *d, const char *path) {
       " (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
       " FROM posts p JOIN users u ON u.id = p.user_id"
       " ORDER BY p.created_at DESC, p.id DESC LIMIT 20") != 0) return -1;
+  /* Single post via LEFT JOIN + GROUP BY: one probe per table instead of a
+     correlated count(*) setup per execution (~2x). Same bytes: bare columns
+     are functionally dependent on p.id, COUNT form matches count(*). */
   if (prep(d, &d->st_post,
-      "SELECT p.id, p.body, p.created_at, u.username,"
-      " (SELECT count(*) FROM likes l WHERE l.post_id = p.id)"
-      " FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?1") != 0) return -1;
+      "SELECT p.id, p.body, p.created_at, u.username, COUNT(l.post_id)"
+      " FROM posts p JOIN users u ON u.id = p.user_id"
+      " LEFT JOIN likes l ON l.post_id = p.id WHERE p.id = ?1 GROUP BY p.id") != 0) return -1;
   if (prep(d, &d->st_create, "INSERT INTO posts (user_id, body) VALUES (?1, ?2)") != 0) return -1;
   if (prep(d, &d->st_sel_ts, "SELECT created_at FROM posts WHERE id = ?1") != 0) return -1;
   if (prep(d, &d->st_like,

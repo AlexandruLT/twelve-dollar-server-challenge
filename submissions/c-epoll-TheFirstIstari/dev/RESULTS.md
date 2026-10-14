@@ -1,4 +1,4 @@
-# Results — CachyOS x86_64 (Ryzen 9 9955HX), droplet-limits containers
+# Results: CachyOS x86_64 (Ryzen 9 9955HX), droplet-limits containers
 # (1 CPU pinned, 2 GiB, no swap, nofile=65535), loopback, k6 v2.3.0 on host cores.
 # Absolute numbers won't match the droplet vCPU; rankings and limiters should.
 
@@ -35,7 +35,7 @@ Early readings taken under background load were discarded; table uses contention
 | ours | 40,000 | 2 min | ~110µs | ~4ms | 0 | PASS |
 | ours | 10,000 | 2 min | ~405µs | ~650µs | 0 | PASS |
 | #26 champion | 70,000 | 5 min (official) | ~5ms | ~10.6ms | 0 / 2.6M | **PASS** (~330 MB container) |
-| #5 C/fio | 70,000 | 2 min | — | — | 0 / 1.28M | **PASS** |
+| #5 C/fio | 70,000 | 2 min | n/a | n/a | 0 / 1.28M | **PASS** |
 
 ## Durability / fault behavior
 | Test | Result |

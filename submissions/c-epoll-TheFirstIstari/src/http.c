@@ -17,7 +17,7 @@ static size_t hdr_end(const char *b, size_t n) {
   for (size_t i = 0; i + 3 < n; i++) {
     if (b[i] == '\r' && b[i+1] == '\n' && b[i+2] == '\r' && b[i+3] == '\n') return i + 4;
   }
-  // tolerate bare \n\n? No — strict CRLF only (all our clients speak CRLF).
+  // tolerate bare \n\n? No: strict CRLF only (all our clients speak CRLF).
   return 0;
 }
 

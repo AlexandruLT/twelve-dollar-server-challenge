@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# saturate.sh <container> <subpath> <port> <label> — 2x20s mixed saturation.
+# saturate.sh <container> <subpath> <port> <label>: 2x20s mixed saturation.
 # Kills servers AND resurrection loops before/after. Server must be prebuilt.
 # Usage (on cachyos): bash dev/saturate.sh s12 /sub 3100 ours
 set -u

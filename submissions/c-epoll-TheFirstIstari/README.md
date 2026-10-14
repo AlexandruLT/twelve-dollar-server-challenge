@@ -3,8 +3,8 @@
 | | |
 |---|---|
 | Language | C (GNU C11, `gcc -O3`, LTO, profile-guided optimization) |
-| Framework | None. Single-threaded HTTP/1.1 on edge-triggered `epoll`, written for this challenge (~2,100 lines, no third-party code) |
-| Libraries | SQLite 3.53.x amalgamation (pinned tarball, SHA-256 verified, compiled with size/speed trims). No OpenSSL, no JSON library, no HTTP library — SHA-256/HMAC, JSON and HTTP are hand-written (~900 lines, unit-tested) |
+| Framework | None. Single-threaded HTTP/1.1 on edge-triggered `epoll`, written for this challenge (~2,000 lines, no third-party code) |
+| Libraries | SQLite 3.53.x amalgamation (pinned tarball, SHA-256 verified, compiled with size/speed trims). No OpenSSL, no JSON library, no HTTP library: SHA-256/HMAC, JSON and HTTP are hand-written (~900 lines, unit-tested) |
 | **Nginx or direct** | **Direct**: serves `$HOST:$PORT` itself (tested on `0.0.0.0:80` semantics; no Nginx) |
 
 ## Run
@@ -20,11 +20,11 @@ loop recovers from an OOM-kill (committed writes survive in the WAL).
 
 ## Why this architecture
 
-A think-time workload (this challenge's k6 loop: ~2.2 requests per 11–30 s
+A think-time workload (this challenge's k6 loop: ~2.2 requests per 11-30 s
 iteration) is bound by **concurrent idle connections, not requests/sec**.
-15,000 mostly-idle keep-alive sockets fit easily in 2 GB — until the
+15,000 mostly-idle keep-alive sockets fit easily in 2 GB, until the
 `LimitNOFILE=65535` file-descriptor ceiling turns into the score ceiling at
-~64–70k users. Nearly every submission stops there, using 12–20% CPU.
+~64-70k users. Nearly every submission stops there, using 12–20% CPU.
 
 This server's whole design is about spending that last 80% of CPU on real work
 while sailing past the descriptor limit honestly:
@@ -33,12 +33,12 @@ while sailing past the descriptor limit honestly:
   open-socket count (O(1), no syscalls). Past ~60k fds it answers the oldest
   idle connections with a fully-drained `Connection: close`; past ~63k every
   response closes and accepts pause until pressure drops below ~55k
-  (hysteresis — no oscillation). Clients transparently reconnect on their next
+  (hysteresis, no oscillation). Clients transparently reconnect on their next
   request, which costs one accept (~100 µs) instead of one permanent fd. No
   API data is stored in the process: eviction keeps transport metadata only,
   every request still reads live SQLite data (rule 5).
 - **One thread, no queues, no locks.** Reads run on the loop thread against a
-  single `NOMUTEX` SQLite connection with persistent prepared statements — a
+  single `NOMUTEX` SQLite connection with persistent prepared statements: a
   feed is a few B-tree hits in the page cache. Writes of one `epoll_wait`
   batch share a single transaction (**group commit**); no response of the batch
   is sent before `COMMIT` returns, and a failed commit rolls back and converts
@@ -66,14 +66,14 @@ while sailing past the descriptor limit honestly:
 |---|---|
 | Official `test/test.sh` | **42/42** (plus 39 API-level + ~50 unit checks, ASan/UBSan clean) |
 | Saturation, 64 conns, mixed 100:100:15:2 | **~107k req/s**, p99 ~1.7 ms, 0 errors |
-| k6 capacity, official `bench/load.js` | **70,000 users, 5-min hold: PASS** — 2.61M checks, 0 failed, p95 ~113 µs, p99 ~5.6 ms (final binary) |
+| k6 capacity, official `bench/load.js` | **70,000 users, 5-min hold: PASS**: 2.61M checks, 0 failed, p95 ~113 µs, p99 ~5.6 ms (final binary) |
 | k6 capacity limit search | **85,000 users, 2-min hold: PASS** (1.56M checks, 0 failed, p95 ~400 µs, p99 ~8.5 ms); k6 RAM (~265 KB/VU) is the next wall, not the server |
 | Same-box competitors (saturation) | Rust/epoll ~107k · C/io_uring ~94k · C++/uWS ~83k · C/epoll ~81k · Zig ~80k · C/fio ~67k |
 | Head-to-head capacity (70k, 5-min) | Champion C/io_uring passes too (p95 ~5 ms, p99 ~10.6 ms, ~330 MB); ours at p95 ~120 µs, p99 ~5.3 ms |
 
 Caveats: a tuned Zen 5 core is faster than the droplet vCPU, so absolute numbers
 won't transfer; rankings and limiters should. k6 needs ~265 KB/VU and one
-ephemeral port per user — past ~28k users the load itself needs multiple
+ephemeral port per user: past ~28k users the load itself needs multiple
 loopback IPs (used here) or the champion's lean load generator.
 
 ## Reproducing our measurements (`dev/`)
@@ -86,15 +86,15 @@ facts matter past ~28k users: Linux gives one ephemeral-port range
 (28k ports) per destination IP, so multi-IP targets (`127.0.0.2`, …) are
 needed; and k6 needs ~265 KB/VU.
 
-- `dev/saturate.sh <container> <subpath> <port> <label>` — 2×20 s mixed
+- `dev/saturate.sh <container> <subpath> <port> <label>`: 2x20 s mixed
   saturation (needs `TOKENS` pointing at the challenge `seed/tokens.json`).
-- `dev/capacity.sh <vus> <ramp_s> <hold_s> <ip> [ip...]` — splits VUs across
+- `dev/capacity.sh <vus> <ramp_s> <hold_s> <ip> [ip...]`: splits VUs across
   one k6 instance per dst IP (fresh DB, one server, official `bench/load.js`).
-- `dev/confirm.sh <vus> <ip> [ip...]` — the official README protocol: 2-min
+- `dev/confirm.sh <vus> <ip> [ip...]`: the official README protocol: 2-min
   warmup at 1k users, 60 s ramp, 5-min hold.
-- `dev/evict_test.py <port>` — fd-pressure check with a small `ulimit -n`
+- `dev/evict_test.py <port>`: fd-pressure check with a small `ulimit -n`
   (tripwires scale down; proves shedding + clean reconnects).
-- `tests/unit.c`, `tests/api_test.c` — portable unit tests and golden-exact
+- `tests/unit.c`, `tests/api_test.c`: portable unit tests and golden-exact
   API tests (`api_test` byte-compares `test/golden/`).
 
 ## Files
