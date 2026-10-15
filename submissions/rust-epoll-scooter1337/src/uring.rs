@@ -185,6 +185,60 @@ struct Pending {
     count: u32,
     interim: bool,
 }
+impl Pending {
+    #[cold]
+    fn rollback(&self, output: &mut Buffer, close: bool, body: &[u8]) {
+        // A failed in-flight send can discard queued bytes later in this same
+        // CQ batch. That connection is closing and has no replies to rewrite.
+        if output.len < self.start
+            || (output.len == self.start && (self.count != 0 || self.interim))
+        {
+            return;
+        }
+        // Recover interim positions from our own encoded responses only after a
+        // failed commit. Successful batches retain their existing metadata and
+        // allocation behavior, including multiple Continue responses per batch.
+        let mut interims = Vec::new();
+        if self.interim {
+            let mut bytes = &output.bytes()[self.start as usize..];
+            let mut count = 0;
+            while !bytes.is_empty() {
+                if let Some(rest) = bytes.strip_prefix(b"HTTP/1.1 100 Continue\r\n\r\n") {
+                    interims.push(count);
+                    bytes = rest;
+                    continue;
+                }
+                let mut headers = [httparse::EMPTY_HEADER; 3];
+                let mut reply = httparse::Response::new(&mut headers);
+                let httparse::Status::Complete(end) = reply.parse(bytes).expect("encoded response")
+                else {
+                    unreachable!("incomplete encoded response");
+                };
+                let length = reply
+                    .headers
+                    .iter()
+                    .find(|h| h.name == "Content-Length")
+                    .and_then(|h| std::str::from_utf8(h.value).ok())
+                    .and_then(|n| n.parse::<usize>().ok())
+                    .expect("encoded response length");
+                bytes = &bytes[end + length..];
+                count += 1;
+            }
+            assert_eq!(count, self.count);
+        }
+        output.len = self.start;
+        let mut interims = interims.into_iter().peekable();
+        for i in 0..=self.count {
+            while interims.peek() == Some(&i) {
+                output.extend(b"HTTP/1.1 100 Continue\r\n\r\n");
+                interims.next();
+            }
+            if i < self.count {
+                response(500, body, close && i + 1 == self.count, output);
+            }
+        }
+    }
+}
 struct Worker {
     // Destroy the ring before any of the allocations referenced by its entries.
     ring: IoUring,
@@ -696,18 +750,7 @@ impl Worker {
                 if c.generation != p.generation || c.state & LIVE == 0 {
                     continue;
                 }
-                c.output.len = p.start;
-                for i in 0..p.count {
-                    response(
-                        500,
-                        &self.body,
-                        c.state & CLOSING != 0 && i + 1 == p.count,
-                        &mut c.output,
-                    );
-                }
-                if p.interim {
-                    c.output.extend(b"HTTP/1.1 100 Continue\r\n\r\n");
-                }
+                p.rollback(&mut c.output, c.state & CLOSING != 0, &self.body);
             }
         }
         for i in 0..self.pending.len() {
@@ -953,3 +996,7 @@ pub fn run(address: &str, app: App, tuning: Tuning) -> io::Result<()> {
         std::thread::park_timeout(Duration::from_secs(3600));
     }
 }
+
+#[cfg(test)]
+#[path = "../tests/support/uring_responses.rs"]
+mod response_tests;

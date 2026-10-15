@@ -256,6 +256,22 @@ impl Db {
         self.transaction = false;
         ok
     }
+    #[cfg(test)]
+    pub(crate) fn reject_commits(&mut self) {
+        unsafe extern "C" {
+            fn sqlite3_commit_hook(
+                db: *mut Connection,
+                hook: Option<unsafe extern "C" fn(*mut c_void) -> c_int>,
+                data: *mut c_void,
+            ) -> *mut c_void;
+        }
+        unsafe extern "C" fn reject(_: *mut c_void) -> c_int {
+            1
+        }
+        unsafe {
+            sqlite3_commit_hook(self.raw, Some(reject), ptr::null_mut());
+        }
+    }
     pub fn checkpoint(&mut self) {
         if self.wal_frames.get() >= 1000 {
             let rc = unsafe {

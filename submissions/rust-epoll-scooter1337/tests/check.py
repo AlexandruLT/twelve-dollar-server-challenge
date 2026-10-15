@@ -77,6 +77,11 @@ with tempfile.TemporaryDirectory(prefix='twelve-tests-') as d:
   raise RuntimeError('server did not start')
  try:
   start()
+  for path in ['/posts/1/comments','/posts/abc/comments','/posts/1/','/posts//']:
+   check(req('GET',path)==(404,{'error':'not found'}),'unknown GET route '+path)
+  for path in ['/posts/1/comments/like','/posts/abc/comments/like','/posts/1/like/extra','/posts/1//like']:
+   for authorization in [None,auth()]:
+    check(req('POST',path,None,authorization)==(404,{'error':'not found'}),'unknown POST route regardless of auth '+path)
   for path in ['/posts/like','/posts//like']:
    check(req('POST',path,None)[0]==401,'missing like ID checks auth first '+path)
    check(req('POST',path,None,auth())==(400,{'error':'invalid post id'}),'missing like ID '+path)

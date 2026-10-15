@@ -93,6 +93,19 @@ fn positive(s: &str) -> Option<i64> {
     }
     s.parse::<i64>().ok().filter(|v| *v > 0)
 }
+#[cold]
+fn post_error(path: &str, status: u16, message: &str, out: &mut Vec<u8>) -> u16 {
+    // Nested paths are unknown regardless of authentication. Keep this check
+    // on error branches so successful requests retain their parsing sequence.
+    if path
+        .strip_prefix("/posts/")
+        .and_then(|s| s.strip_suffix("/like"))
+        .is_some_and(|s| s.contains('/'))
+    {
+        return error(out, 404, "not found");
+    }
+    error(out, status, message)
+}
 struct Auth {
     mac: Hmac<Sha256>,
     header: Vec<u8>,
@@ -408,7 +421,9 @@ impl App {
                 if let Some(id) = positive(s) {
                     return self.db.read(Some(id), out);
                 }
-                return error(out, 400, "invalid post id");
+                if !s.contains('/') {
+                    return error(out, 400, "invalid post id");
+                }
             }
         }
         if frame.method == "POST"
@@ -416,7 +431,7 @@ impl App {
         {
             let (user, username) = match self.auth.user(frame.authorization) {
                 Ok(v) => v,
-                Err(msg) => return error(out, 401, msg),
+                Err(msg) => return post_error(path, 401, msg, out),
             };
             if path == "/posts" {
                 let value: PostBody = match serde_json::from_slice(&frame.body) {
@@ -440,7 +455,7 @@ impl App {
                 .and_then(|s| s.strip_suffix("/like"))
                 .and_then(positive)
             else {
-                return error(out, 400, "invalid post id");
+                return post_error(path, 400, "invalid post id", out);
             };
             return self.db.like(user, id, out);
         }
