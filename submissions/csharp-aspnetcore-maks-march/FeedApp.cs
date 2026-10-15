@@ -8,10 +8,7 @@ using Microsoft.AspNetCore.Http.Features;
 
 namespace FeedApi;
 
-/// <summary>
-/// A pooled pair of request/response features; 
-/// Kestrel gives them to us per request.
-/// </summary>
+/// <summary>A pooled pair of request/response features; Kestrel gives them to us per request.</summary>
 internal sealed class RequestContext
 {
     public IHttpRequestFeature Request = null!;
@@ -153,7 +150,7 @@ internal sealed class FeedApp : IHttpApplication<RequestContext>
         await WriteAsync(context, 404, ErrNotFound).ConfigureAwait(false);
     }
 
-    # region handlers
+    // --- handlers --------------------------------------------------------------------------------
 
     private async Task HealthAsync(RequestContext context)
     {
@@ -314,9 +311,8 @@ internal sealed class FeedApp : IHttpApplication<RequestContext>
         finally { Json.Return(json); }
     }
 
-    #endregion
+    // --- helpers ---------------------------------------------------------------------------------
 
-    #region helpers
     private static async Task WriteAsync(RequestContext context, int status, ReadOnlyMemory<byte> body)
     {
         var response = context.Response;
@@ -390,6 +386,4 @@ internal sealed class FeedApp : IHttpApplication<RequestContext>
         id = (long)value;
         return true;
     }
-    
-    #endregion
 }

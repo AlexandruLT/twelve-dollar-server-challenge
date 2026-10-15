@@ -4,7 +4,7 @@
 |---|---|
 | Language | C# (net10.0), .NET SDK **10.0.401** — LTS, pinned in `install.sh` (includes the ASP.NET Core 10.0.12 runtime) |
 | Framework | **ASP.NET Core — Kestrel**, hosted directly through `IServer.StartAsync(IHttpApplication<TContext>)`: no `WebApplication` pipeline, no middleware, no routing, no `HttpContext` |
-| Server | Kestrel, HTTP/1.1 only, keep-alive (default 130 s idle timeout) |
+| Server | Kestrel, HTTP/1.1 only, keep-alive (default 130 s idle timeout); requests run start-to-finish on the socket I/O thread |
 | SQLite driver | **Microsoft.Data.Sqlite 10.0.12** over SQLitePCLRaw `bundle_e_sqlite3`, a single long-lived connection guarded by a lock |
 | JSON | `System.Text.Json` `Utf8JsonWriter` into pooled buffers; exact key order, compact output |
 | **Nginx or direct** | **Direct**: serves `HOST:PORT` (`0.0.0.0:80` on the benchmark box) itself |
@@ -39,6 +39,15 @@ are pooled, so steady-state read traffic allocates only what SQLite returns.
   removes that entire layer. The same reason it goes **direct instead of Nginx**: on one
   core, Nginx's CPU comes straight out of the app's budget, and Kestrel already is a
   production HTTP server that comfortably holds thousands of idle keep-alive connections.
+- **No thread hops.** `DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1` is set for our own
+  process before the first socket exists (rule 11), and Kestrel's socket transport runs with
+  `UnsafePreferInlineScheduling`: a request is served by the I/O thread that completed its
+  socket operation, instead of being queued to the thread pool. On a single core a pool hop
+  costs a context switch plus a scheduler wakeup per request — this is the biggest remaining
+  CPU and tail-latency lever after raw hosting. It is safe here because every step of a
+  request is short (SQLite calls are index lookups in the microsecond range); the only
+  multi-millisecond stall is SQLite's automatic WAL checkpoint, which runs off the
+  committing statement and briefly parks that one request.
 - **One connection + one lock.** The box has a single core and every query is an index or
   primary-key lookup finishing in well under a millisecond, so serializing on the
   connection costs nothing in throughput, makes `SqliteConnection` (not thread-safe) safe,
@@ -46,7 +55,7 @@ are pooled, so steady-state read traffic allocates only what SQLite returns.
   once and reused — only parameter values change.
 - **Zero-allocation hot path.** Pooled request contexts, pooled `IBufferWriter<byte>` JSON
   buffers reused via `Utf8JsonWriter.Reset`, `ArrayPool` request-body buffers, prebuilt
-  byte arrays for every error response. GC (workstation, concurrent) almost never runs.
+  byte arrays for every error response. GC almost never runs.
 - **JWT verified by hand on every authenticated request** (rule 5): stackalloc buffers,
   a hand-rolled base64url decoder, a `ThreadStatic` pre-keyed `HMACSHA256`,
   `Utf8JsonReader` scans of header/payload, constant-time signature comparison. HS256
@@ -55,18 +64,26 @@ are pooled, so steady-state read traffic allocates only what SQLite returns.
 - **SQL**: the reference queries. A like is one statement —
   `INSERT … SELECT … WHERE EXISTS (post) ON CONFLICT DO NOTHING` — and the post-existence
   check runs only when nothing was inserted, to tell "already liked" from "no such post".
-- **Pragmas**: `journal_mode=WAL` + `synchronous=NORMAL` (rule 6: every 201 is sent only
+- **Pragmas**: `locking_mode=EXCLUSIVE` (set before WAL is first touched: the file lock is
+  taken once instead of around every statement — one less `fcntl` syscall per query; with a
+  single process and connection the WAL index lives in heap and no `-shm` file is created),
+  `journal_mode=WAL` + `synchronous=NORMAL` (rule 6: every 201 is sent only
   after its row is committed — the `RETURNING` insert is stepped to `DONE` before the
-  response), `mmap_size=1 GiB` (reads via the OS page cache), `cache_size=64 MiB`,
+  response), `journal_size_limit=64 MiB` (the WAL file never shrinks on its own),
+  `mmap_size=1 GiB` (reads via the OS page cache), `cache_size=64 MiB`,
   `temp_store=MEMORY`, `busy_timeout=5000`, `foreign_keys=OFF` (the reference setup —
   a like of a missing post is a 404, not an FK error).
+  One consequence of EXCLUSIVE: while the server runs, no other process can open the
+  database — stop it before inspecting the file with the sqlite3 CLI.
 - **Trimming/validation identical to the reference**: bodies are trimmed with
   JavaScript's exact `String.prototype.trim()` whitespace set; ids are positive plain
   decimal integers, with values above SQLite's INTEGER range answered as 404 (a row that
   big cannot exist).
-- **Runtime knobs**: workstation concurrent GC (tiny allocation rate, one core — shorter
-  pauses than server GC), `ThreadPool.SetMinThreads(4)` to absorb arrival bursts without
-  waiting for thread injection, `InvariantGlobalization`, HTTP/1.1-only listeners.
+- **Runtime knobs**: workstation **non-concurrent** GC (near-zero allocation rate, one core,
+  and requests now run on the I/O thread — no background GC thread competing for it),
+  `SkipLocalsInit` (stackalloc buffers in the JWT path are not zeroed),
+  `ThreadPool.SetMinThreads(4)` to absorb arrival bursts without waiting for thread
+  injection, `InvariantGlobalization`, HTTP/1.1-only listeners.
 
 ## License
 

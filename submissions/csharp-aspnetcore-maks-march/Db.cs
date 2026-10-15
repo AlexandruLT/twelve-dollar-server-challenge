@@ -44,8 +44,17 @@ internal sealed class Db : IDisposable
         _conn.Open();
 
         // Rule 6: WAL + synchronous=NORMAL; the rest is read-side tuning.
+        // EXCLUSIVE takes the database file lock once, for the lifetime of the connection,
+        // instead of around every statement — one less fcntl syscall per query. It must be
+        // set before WAL is first touched. With a single process and one connection the WAL
+        // index lives in heap, so no -shm file is created. (Stop the server before opening
+        // the database with the sqlite3 CLI.)
+        Exec("PRAGMA locking_mode = EXCLUSIVE");
         Exec("PRAGMA journal_mode = WAL");
         Exec("PRAGMA synchronous = NORMAL");
+        // Cap the WAL file after checkpoints: on its own the file never shrinks below its
+        // high-water mark, and a limit keeps disk usage bounded after long benchmark days.
+        Exec("PRAGMA journal_size_limit = 67108864");
         Exec("PRAGMA busy_timeout = 5000");
         Exec("PRAGMA mmap_size = 1073741824");  // read through the OS page cache, no copies
         Exec("PRAGMA cache_size = -65536");     // 64 MiB

@@ -5,8 +5,15 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.AspNetCore.Hosting.Server;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
+using Microsoft.AspNetCore.Server.Kestrel.Transport.Sockets;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
+
+// Keep every socket completion on the I/O thread that observed it instead of queueing it to
+// the thread pool (rule 11: a setting of our own process, set before the first socket exists).
+// Together with UnsafePreferInlineScheduling below, a request runs start to finish on one
+// thread: no pool hop, no extra scheduler wakeup, no context switch per request.
+Environment.SetEnvironmentVariable("DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS", "1");
 
 var sqlitePath = Environment.GetEnvironmentVariable("SQLITE_PATH")
     ?? throw new InvalidOperationException("SQLITE_PATH is not set");
@@ -21,6 +28,11 @@ ThreadPool.SetMinThreads(4, 4);
 
 var builder = WebApplication.CreateBuilder();
 builder.Logging.ClearProviders();
+// Kestrel's own continuations run inline on the I/O thread as well. Safe here because
+// every step of a request is short (SQLite calls are index lookups in microseconds);
+// nothing ever blocks the I/O thread.
+builder.Services.Configure<SocketTransportOptions>(
+    sockets => sockets.UnsafePreferInlineScheduling = true);
 builder.WebHost.ConfigureKestrel(kestrel =>
 {
     kestrel.AddServerHeader = false;
