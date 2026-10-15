@@ -25,13 +25,16 @@ start.sh runs in the foreground using only the four environment variables in SPE
 - Live reads share a deferred SQLite transaction through each serialized completion batch. Writes upgrade it as needed, avoiding repeated pager setup while keeping every query live. Grouped responses wait for successful commit; failed batches replace tentative replies with errors.
 - WAL, synchronous=NORMAL, foreign keys, exclusive locking, a 500-page SQLite cache and a 1 GiB mmap limit. Linux builds enable SQLite's fdatasync path. Checkpoints run after commit.
 - SQLite PGO trains on a disposable synthetic file database at build time. It uses no challenge seed data and is not linked into the server. Disable it with bash build.sh --no-default-features.
-- httparse, serde_json, hmac/sha2 and itoa handle parsing, full JSON validation, individual HS256 verification and integer formatting. Ordinary fields borrow their input; JWT decode and response buffers are reused. Checked SSE2/NEON loads handle JSON escaping.
+- httparse handles HTTP framing. A standalone LUFP-style cursor validates complete JSON documents and extracts JWT/body fields in one pass. Ordinary strings borrow the input; escapes and Unicode are checked before use. The x86-64 input scanner uses bounded SSE2 loads. serde and serde_json are development dependencies for differential tests only.
+- hmac/sha2 verifies every HS256 signature; JWT decode and response buffers are reused. itoa formats integers, and checked SSE2/NEON loads handle response JSON escaping.
 
 There is no application CPU affinity or kernel tuning. Every request reads SQLite while it is served. Idle keep-alives remain open; stalled partial requests or sends are shut down after 120 seconds.
 
 Unsafe code covers C bindings, Linux I/O, vector loads and compact owning buffers. Received bytes are borrowed after their CQE transfers ownership and republished only after parsing finishes. Send allocations cannot grow, move or be freed while the kernel holds them. The connection table can grow because SQEs reference separate allocations, never connection-record addresses.
 
 ## Validation and measurements
+
+The LUFP parser follow-up and its Ubuntu/WSL measurements are documented in [LUFP.md](LUFP.md).
 
 The results below cover the read-transaction follow-up at `bd517fa`, before the buffer/retry changes above. The preceding io_uring measurements and profiles are in [IO_URING.md](IO_URING.md); older epoll comparisons and k6 searches are in [BENCHMARKS.md](BENCHMARKS.md).
 
