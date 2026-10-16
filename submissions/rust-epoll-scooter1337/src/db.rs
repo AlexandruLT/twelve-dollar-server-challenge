@@ -273,7 +273,7 @@ impl Db {
         }
     }
     pub fn checkpoint(&mut self) {
-        if self.wal_frames.get() >= 1000 {
+        if self.wal_frames.get() >= 4096 {
             let rc = unsafe {
                 sqlite3_wal_checkpoint_v2(
                     self.raw,

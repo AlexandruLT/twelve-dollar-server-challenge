@@ -23,7 +23,7 @@ start.sh runs in the foreground using only the four environment variables in SPE
 - One 64-byte connection record. Partial inputs allocate on demand. Output allocations remain fixed until the last send completion, then return to a bounded pool. Idle connections retain no response buffers. Generations reject stale completions after slot reuse; backpressure pauses reads until output drains.
 - Every feed first discovers the newest 20 IDs. If their span is under 256, live range scans fetch rows and like counts, then restore timestamp/ID order. Sparse IDs use the original query. No seed-specific IDs, cached results or changed indexes.
 - Live reads share a deferred SQLite transaction through each serialized completion batch. Writes upgrade it as needed, avoiding repeated pager setup while keeping every query live. Grouped responses wait for successful commit; failed batches replace tentative replies with errors.
-- WAL, synchronous=NORMAL, foreign keys, exclusive locking, a 500-page SQLite cache and a 1 GiB mmap limit. Linux builds enable SQLite's fdatasync path. Checkpoints run after commit.
+- WAL, synchronous=NORMAL, foreign keys, exclusive locking, a 500-page SQLite cache and a 1 GiB mmap limit. Linux builds enable SQLite's fdatasync path. Synchronous RESTART checkpoints run after commit once the WAL reaches 4,096 frames, amortizing checkpoint I/O while retaining commit-before-response ordering.
 - SQLite PGO trains on a disposable synthetic file database at build time. It uses no challenge seed data and is not linked into the server. Disable it with bash build.sh --no-default-features.
 - httparse handles HTTP framing. A standalone LUFP-style cursor validates complete JSON documents and extracts JWT/body fields in one pass. Ordinary strings borrow the input; escapes and Unicode are checked before use. The x86-64 input scanner uses bounded SSE2 loads. serde and serde_json are development dependencies for differential tests only.
 - hmac/sha2 verifies every HS256 signature; JWT decode and response buffers are reused. itoa formats integers, and checked SSE2/NEON loads handle response JSON escaping.
@@ -34,7 +34,9 @@ Unsafe code covers C bindings, Linux I/O, vector loads and compact owning buffer
 
 ## Validation and measurements
 
-The LUFP parser follow-up and its Ubuntu/WSL measurements are documented in [LUFP.md](LUFP.md).
+The LUFP parser follow-up and its Ubuntu/WSL measurements are documented in [LUFP.md](LUFP.md). The subsequent checkpoint, issuer, SQL and batching experiments, including rejected versions and the checkpoint tradeoff, are documented in [RESEARCH.md](RESEARCH.md).
+
+The 4,096-frame checkpoint follow-up improves mixed throughput in Ubuntu/WSL normal-build comparisons: +7.96% across six pairs at 64 connections and +14.03%/+14.58% in two pairs at 1,024. It costs about 14 MiB more peak cgroup memory and longer checkpoint stalls; CPU/request rises at 64 connections and falls at 1,024. The normal build passes the unchanged official five-minute hold at 15,000 users with zero failures. These are local measurements, not an official capacity score.
 
 The results below cover the read-transaction follow-up at `bd517fa`, before the buffer/retry changes above. The preceding io_uring measurements and profiles are in [IO_URING.md](IO_URING.md); older epoll comparisons and k6 searches are in [BENCHMARKS.md](BENCHMARKS.md).
 

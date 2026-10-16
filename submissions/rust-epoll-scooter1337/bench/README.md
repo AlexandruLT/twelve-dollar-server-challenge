@@ -1,5 +1,7 @@
 # Reproduce the local comparison
 
+The 16 October 2026 follow-ups have separate evidence archives: [`lufp-results.json.gz`](lufp-results.json.gz) for the parser and [`research-results.json.gz`](research-results.json.gz) for checkpoint/transport/SQL experiments. See [LUFP.md](../LUFP.md) and [RESEARCH.md](../RESEARCH.md) for accepted changes, rejected candidates, Ubuntu/WSL methodology and limitations. Both archives include their local runner sources and raw results; they do not establish an official droplet score.
+
 The manifest pins 13 submission commits (#1–14) and the challenge snapshot. Newer submissions #15–18 are not included. The application sources and build flags are preserved. Preparation shares pinned Ruby and Erlang runtimes across submissions and selects the official checksum-pinned ARM64 Bun 1.4.2 asset in place of the installers' x86-64 asset.
 
 Requires an ARM64 Docker host with four Docker CPUs, Python 3, git and network access. From this directory:
