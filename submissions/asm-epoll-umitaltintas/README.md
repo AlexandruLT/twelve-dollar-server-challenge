@@ -58,27 +58,45 @@ four steps:
   the next commit starts the WAL from the beginning. `journal_size_limit` truncates the file.
 - **Pragmas** (all allowed by rule 6): `journal_mode=WAL`, `synchronous=NORMAL`,
   `mmap_size=1 GiB` (reads come from the OS page cache), and a small 8 MB SQLite page cache.
+- **Keep-alive is capped below the fd limit, so connections beyond 65k still get served.** The
+  service runs with `LimitNOFILE=65535`. That is one fd per open connection, and keep-alive
+  clients that are thinking for 3–15 s hold theirs the whole time. Without a cap, the
+  65,536th client could not connect at all. Once 60,000 connections are open, newly accepted ones
+  are answered with `Connection: close` (one request each), while the existing keep-alive
+  connections stay as they are. Deciding per connection matters: when I tried it per request, the
+  open count hovered at the cap, nearly every response closed its connection, and the churn
+  doubled. The server closes first, so `TIME_WAIT` stays on the server, where it costs no fd and
+  no client port. A short connection costs about 10 µs of extra kernel time. If the fd table fills
+  up anyway, the listen socket is taken out of epoll until a connection closes, so the loop
+  doesn't spin on `EMFILE`; new clients wait in the kernel's accept queue meanwhile.
 - **Small memory footprint.** Each connection is a 32-byte record indexed by fd. Buffers are
   allocated only for a partial request or for output the socket could not take. The server's RSS
   stays around 25 MB with 64k open connections.
 
 ## Results (local, not the benchmark box)
 
-Measured on an Apple Silicon Mac. The server ran in an `linux/amd64` Ubuntu 24.04 container
-limited to `--cpus=1 --memory=2g`, so it was **Rosetta-emulated**. The load came from a Go
-reimplementation of `bench/load.js` (same user loop, think times and probabilities), because k6
-itself became the bottleneck at around 15k VUs on this machine. Both ran on the same machine,
-with no real network in between. The numbers are only useful for comparing changes to this code;
-they are not a prediction for the droplet.
+Measured on an Apple Silicon Mac. The server ran in a `linux/amd64` Ubuntu 24.04 container
+pinned to one core (`--cpuset-cpus=0 --memory=2g`, `nofile=65535`), so it was
+**Rosetta-emulated**. The load came from a Go reimplementation of `bench/load.js` (same user loop,
+think times and probabilities, a new connection after `Connection: close`), split over four
+containers on the other cores, because k6 itself became the bottleneck at around 15k VUs on this
+machine. There was no real network in between, and the kernel's work for the load generators'
+packets ran on their cores, not the server's. The numbers are only useful for comparing changes
+to this code; they are not a prediction for the droplet.
 
-| VUs (2 min hold) | p50 | p95 | p99 | failed | server CPU | server RSS |
-|---|---|---|---|---|---|---|
-| 20,000 | 0.7 ms | 2.3 ms | 5.5 ms | 0% | ~30% | ~40 MB |
-| 48,000 | 0.9 ms | 3.6 ms | 24 ms | 0% | ~46% | ~25 MB |
-| 64,000 | 0.6 ms | 3.5 ms | 38 ms | 0% | ~42% | ~23 MB |
+| VUs (90 s ramp, 5 min hold) | p50 | p95 | p99 | failed | result |
+|---|---|---|---|---|---|
+| 88,000 | 0.7 ms | 43 ms | 290 ms | 0% | pass |
+| 96,000 | 1.3 ms | 520–590 ms | 1.9 s | 0% | fail (CPU) |
 
-`LimitNOFILE=65535` caps the server at about 65.5k connections, so 64k VUs is the ceiling for any
-submission.
+At 88k, 60k clients stay on keep-alive connections and the other 28k open a new connection per
+request. The server's RSS stays around 23 MB. At 96k the single core runs out: there are no failed
+requests, but queueing pushes p99 past 1 s. Before the keep-alive cap, everything above about 64k
+VUs failed outright, because the 65,536th connection could not be accepted.
+
+Taking new connections every 128 events within a batch (not just once per `epoll_wait`) mattered
+near the limit. At 96k it cut the kernel's accept-queue overflows from 49,442 to 2,840, and SYN
+retransmissions from 565 to 0. Each dropped SYN costs the client at least 1 s.
 
 ## Trade-offs
 

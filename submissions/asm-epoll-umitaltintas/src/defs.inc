@@ -15,6 +15,8 @@
 
 %define EAGAIN            11
 %define EINTR             4
+%define ENFILE            23
+%define EMFILE            24
 
 %define EPOLLIN           0x001
 %define EPOLLOUT          0x004
@@ -29,6 +31,9 @@
 
 ; Sizes
 %define MAXCONN           65536          ; fds are below LimitNOFILE=65535
+%ifndef KA_LIMIT
+%define KA_LIMIT          60000          ; above this many open connections, stop keeping them alive
+%endif
 %define CONN_SHIFT        5              ; 32-byte connection records
 %define MAXEV             1024           ; epoll events per batch
 %define SCRATCH_SZ        65536          ; one request is read and parsed here
@@ -43,12 +48,13 @@
 ; Connection record (32 bytes, indexed by fd)
 %define C_INBUF           0              ; leftover partial request (malloc) or 0
 %define C_INLEN           8
-%define C_FLAGS           12             ; F_ALIVE, F_CLOSE_AFTER
+%define C_FLAGS           12             ; F_ALIVE, F_CLOSE_AFTER, F_NOKA
 %define C_OUTBUF          16             ; unsent output (malloc) or 0
 %define C_OUTLEN          24
 %define C_OUTOFF          28
 %define F_ALIVE           1
 %define F_CLOSE_AFTER     2
+%define F_NOKA            4              ; accepted over KA_LIMIT: no keep-alive
 
 ; Response record (16 bytes): fd, arena offset, length, flags
 %define R_FD              0

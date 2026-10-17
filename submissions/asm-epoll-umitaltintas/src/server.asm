@@ -54,6 +54,8 @@ epfd:       resd 1
 lfd:        resd 1
 cur_fd:     resd 1
 cur_flags:  resd 1                ; RF_* for the response being built
+nconn:      resd 1                ; open client connections
+accept_off: resd 1                ; 1 while the listen socket is out of epoll (fd table full)
 in_txn:     resd 1
 wal_frames: resd 1                ; frames in the WAL after the last commit (from the WAL hook)
 req_method: resd 1                ; 1 GET, 2 POST, 0 other
@@ -491,6 +493,16 @@ event_loop:
 .ev:
   cmp r13d, r12d
   jae .done
+  ; a full batch takes a while under load: take new connections every 128 events too,
+  ; so the kernel's accept queue (somaxconn, 4096) doesn't overflow and drop SYNs
+  test r13d, 127
+  jnz .one
+  test r13d, r13d
+  jz .one
+  cmp dword [accept_off], 0
+  jne .one
+  call do_accept
+.one:
   lea eax, [r13d + r13d*2]
   lea rbx, [events]
   lea rbx, [rbx + rax*4]
@@ -517,7 +529,7 @@ do_accept:
   push rbx
   push r12
   push r13
-  mov r12d, 512               ; per batch, so a connect storm can't starve requests
+  mov r12d, 1024              ; per call, so a connect storm can't starve requests
 .l:
   mov edi, [lfd]
   xor esi, esi
@@ -525,7 +537,7 @@ do_accept:
   mov r10d, SOCK_NONBLOCK
   SYSCALL SYS_accept4
   test rax, rax
-  js .ret
+  js .err
   mov ebx, eax
   cmp ebx, MAXCONN
   jae .reject
@@ -541,7 +553,15 @@ do_accept:
   mov [rax+8], rcx
   mov [rax+16], rcx
   mov [rax+24], rcx
-  mov dword [rax+C_FLAGS], F_ALIVE
+  ; past KA_LIMIT open connections, new ones are answered with "Connection: close"
+  ; (one request each), so idle keep-alive clients can't run the fd table out
+  mov ecx, F_ALIVE
+  cmp dword [nconn], KA_LIMIT
+  jb .ka
+  mov ecx, F_ALIVE | F_NOKA
+.ka:
+  mov [rax+C_FLAGS], ecx
+  inc dword [nconn]
   mov edi, EPOLL_CTL_ADD
   mov esi, ebx
   mov edx, EPOLLIN
@@ -553,6 +573,20 @@ do_accept:
   pop r12
   pop rbx
   ret
+.err:
+  cmp rax, -EMFILE
+  je .full
+  cmp rax, -ENFILE
+  jne .ret
+.full:
+  ; no fd left: stop polling the listen socket (it would stay readable and spin the loop)
+  ; until a connection closes. New clients wait in the kernel's accept queue meanwhile.
+  mov dword [accept_off], 1
+  mov edi, EPOLL_CTL_MOD
+  mov esi, [lfd]
+  xor edx, edx
+  call ep_ctl
+  jmp .ret
 .reject:
   mov edi, ebx
   SYSCALL SYS_close
@@ -569,6 +603,15 @@ close_conn:
   jz .ret
   mov edi, ebx
   SYSCALL SYS_close
+  dec dword [nconn]
+  cmp dword [accept_off], 0
+  je .accepting
+  mov dword [accept_off], 0   ; an fd is free again: resume accepting
+  mov edi, EPOLL_CTL_MOD
+  mov esi, [lfd]
+  mov edx, EPOLLIN
+  call ep_ctl
+.accepting:
   mov rdi, [r12+C_INBUF]
   test rdi, rdi
   jz .noin
@@ -1005,7 +1048,13 @@ process_data:
 .found:
   lea r14, [rdi+4]            ; r14 = body start
   lea r15, [rdi+2]            ; r15 = end of the last header line (incl. CRLF)
-  mov dword [cur_flags], 0
+  CONN rax, rbx
+  xor ecx, ecx
+  test dword [rax+C_FLAGS], F_NOKA
+  jz .ka_ok
+  mov ecx, RF_CLOSE
+.ka_ok:
+  mov [cur_flags], ecx
   xor eax, eax
   mov [req_blen], rax
   mov [req_auth], rax
