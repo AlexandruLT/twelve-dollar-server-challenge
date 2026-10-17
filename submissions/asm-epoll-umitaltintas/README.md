@@ -82,6 +82,32 @@ four steps:
 
 ## Results (local, not the benchmark box)
 
+### Native x86-64
+
+Measured on an x86-64 KVM server (AMD EPYC-Milan, 8 vCPU, Ubuntu 24.04, kernel 6.8). The server
+ran in a container pinned to one vCPU (`--cpuset-cpus`, 2 GiB, `nofile=65535`), with the database
+on local disk. The load came from the Go reimplementation of `bench/load.js` described below:
+four processes on four other vCPUs, each connecting from its own loopback address (127.0.0.2–5),
+inside the server's network namespace. There is no network card in between, so the kernel's
+network cost is lower than on a droplet. 90 s ramp, **2 min hold** (scoring uses 5 min).
+
+| VUs | p50 | p95 | p99 | failed | server CPU (one vCPU) |
+|---|---|---|---|---|---|
+| 32,000 | 0.3 ms | 0.7 ms | 12–25 ms | 0% | 32% |
+| 64,000 | 0.2 ms | 0.7 ms | 37–45 ms | 0% | 36% |
+| 96,000 | 0.3 ms | 1.0–1.2 ms | 42–47 ms | 0% | 55% |
+| 128,000 | 0.4 ms | 15–17 ms | 52–57 ms | 0% | 74% |
+| 160,000 | 0.7 ms | 30–32 ms | 61–67 ms | 0% | 89% |
+| 192,000 | 1.9–2.0 ms | 54–57 ms | 83–89 ms | 0% | 95% |
+
+At 192k (about 16,400 requests/s) the core is at 95%, so the ceiling on this machine is a
+little above that. No run had an accept-queue overflow or a SYN retransmission. The container
+used about 110 MiB at both 96k and 192k (including page cache). CPU per request falls as load
+grows, because each `epoll_wait` returns more events: 32k users cost 32% of the core and 64k
+only 36%.
+
+### Rosetta-emulated (Apple Silicon)
+
 Measured on an Apple Silicon Mac. The server ran in a `linux/amd64` Ubuntu 24.04 container
 pinned to one core (`--cpuset-cpus=0 --memory=2g`, `nofile=65535`), so it was
 **Rosetta-emulated**. The database was on the Linux VM's own disk. (On a macOS bind mount,
