@@ -77,26 +77,38 @@ four steps:
 
 Measured on an Apple Silicon Mac. The server ran in a `linux/amd64` Ubuntu 24.04 container
 pinned to one core (`--cpuset-cpus=0 --memory=2g`, `nofile=65535`), so it was
-**Rosetta-emulated**. The load came from a Go reimplementation of `bench/load.js` (same user loop,
-think times and probabilities, a new connection after `Connection: close`), split over four
-containers on the other cores, because k6 itself became the bottleneck at around 15k VUs on this
-machine. There was no real network in between, and the kernel's work for the load generators'
-packets ran on their cores, not the server's. The numbers are only useful for comparing changes
-to this code; they are not a prediction for the droplet.
+**Rosetta-emulated**. The database was on the Linux VM's own disk. (On a macOS bind mount,
+occasional slow fsyncs caused multi-second stalls that had nothing to do with this code.) The
+load came from a Go reimplementation of `bench/load.js` (same user loop, think times and
+probabilities, a new connection after `Connection: close`), split over four containers on the
+other cores, because k6 itself became the bottleneck at around 15k VUs on this machine. There was
+no real network in between, and the kernel's work for the load generators' packets ran on their
+cores, not the server's. The numbers are only useful for comparing changes to this code; they
+are not a prediction for the droplet.
 
 | VUs (90 s ramp, 5 min hold) | p50 | p95 | p99 | failed | result |
 |---|---|---|---|---|---|
-| 88,000 | 0.7 ms | 43 ms | 290 ms | 0% | pass |
-| 96,000 | 1.3 ms | 520–590 ms | 1.9 s | 0% | fail (CPU) |
+| 96,000 | 0.6 ms | 34 ms | 165–176 ms | 0% | pass |
+| 112,000 | 1.6 ms | 790–850 ms | 1.8–2.0 s | 0% | fail (CPU) |
 
-At 88k, 60k clients stay on keep-alive connections and the other 28k open a new connection per
-request. The server's RSS stays around 23 MB. At 96k the single core runs out: there are no failed
-requests, but queueing pushes p99 past 1 s. Before the keep-alive cap, everything above about 64k
-VUs failed outright, because the 65,536th connection could not be accepted.
+At 96k, 60k clients stay on keep-alive connections and the other 36k open a new connection per
+request; the server's RSS stays around 25 MB. At 112k the single core runs out at about
+10,400 requests/s: no request fails, but queueing pushes p95 and p99 past the limits. Before the
+keep-alive cap, everything above about 64k VUs failed outright, because the 65,536th connection
+could not be accepted.
 
 Taking new connections every 128 events within a batch (not just once per `epoll_wait`) mattered
-near the limit. At 96k it cut the kernel's accept-queue overflows from 49,442 to 2,840, and SYN
-retransmissions from 565 to 0. Each dropped SYN costs the client at least 1 s.
+near the limit. In one 96k run it cut the kernel's accept-queue overflows from 49,442 to 2,840,
+and SYN retransmissions from 565 to 0. Each dropped SYN costs the client at least 1 s.
+
+**Tried and dropped: one fd table per thread.** `LimitNOFILE` limits each fd table, not the
+process. So I/O threads that call `unshare(CLONE_FILES)`, each with its own `SO_REUSEPORT`
+listen socket and epoll, can keep more than 65k connections alive in one process; 112k worked.
+But POSIX locks are owned per fd table, so SQLite had to run in `locking_mode=EXCLUSIVE` with no
+background checkpoint connection, and all SQLite work had to go through one mutex. It was no
+faster: at 96k p99 was about 300 ms instead of 170 ms, and at 112k both versions were CPU-bound.
+A new connection costs about 10 µs of kernel time, so serving the clients past 60k with
+`Connection: close` is the cheaper and simpler option.
 
 ## Trade-offs
 
