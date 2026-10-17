@@ -55,6 +55,9 @@ lfd:        resd 1
 cur_fd:     resd 1
 cur_flags:  resd 1                ; RF_* for the response being built
 nconn:      resd 1                ; open client connections
+ipcnt:      resd IP_BUCKETS       ; open connections per client-address bucket
+acc_addr:   resb 16               ; sockaddr_in from accept4
+acc_alen:   resd 1
 accept_off: resd 1                ; 1 while the listen socket is out of epoll (fd table full)
 in_txn:     resd 1
 wal_frames: resd 1                ; frames in the WAL after the last commit (from the WAL hook)
@@ -532,8 +535,9 @@ do_accept:
   mov r12d, 1024              ; per call, so a connect storm can't starve requests
 .l:
   mov edi, [lfd]
-  xor esi, esi
-  xor edx, edx
+  lea rsi, [acc_addr]
+  mov dword [acc_alen], 16
+  lea rdx, [acc_alen]
   mov r10d, SOCK_NONBLOCK
   SYSCALL SYS_accept4
   test rax, rax
@@ -553,13 +557,27 @@ do_accept:
   mov [rax+8], rcx
   mov [rax+16], rcx
   mov [rax+24], rcx
-  ; past KA_LIMIT open connections, new ones are answered with "Connection: close"
-  ; (one request each), so idle keep-alive clients can't run the fd table out
+  ; Keep-alive has two budgets. Past KA_LIMIT open connections in total, or KA_PER_IP from
+  ; one client address, new connections are answered with "Connection: close" (one request
+  ; each). The first keeps idle clients from running the fd table out. The second keeps one
+  ; address (a NAT, a proxy, a load generator) under the ~28k local ports a Linux client has
+  ; by default: a keep-alive connection pins a client port, while one the server closes first
+  ; frees it at once.
+  mov ecx, [acc_addr+4]       ; IPv4 address
+  imul ecx, ecx, 0x9E3779B1
+  shr ecx, 16                 ; bucket 0..65535
+  mov [rax+C_IPB], ecx
+  lea rdx, [ipcnt]
+  lea rdx, [rdx + rcx*4]
   mov ecx, F_ALIVE
   cmp dword [nconn], KA_LIMIT
+  jae .noka
+  cmp dword [rdx], KA_PER_IP
   jb .ka
+.noka:
   mov ecx, F_ALIVE | F_NOKA
 .ka:
+  inc dword [rdx]
   mov [rax+C_FLAGS], ecx
   inc dword [nconn]
   mov edi, EPOLL_CTL_ADD
@@ -604,6 +622,9 @@ close_conn:
   mov edi, ebx
   SYSCALL SYS_close
   dec dword [nconn]
+  mov eax, [r12+C_IPB]
+  lea rcx, [ipcnt]
+  dec dword [rcx + rax*4]
   cmp dword [accept_off], 0
   je .accepting
   mov dword [accept_off], 0   ; an fd is free again: resume accepting
@@ -883,6 +904,13 @@ flush:
   add rsi, rax
   mov edx, [r13+R_LEN]
   mov r10d, MSG_NOSIGNAL
+  test dword [r13+R_FLAGS], RF_CLOSE
+  jz .sflags
+  ; the connection closes right after this send: hold the data back (MSG_MORE) so close()
+  ; puts the FIN on the same segment. The client then always sees data and FIN together,
+  ; closes second, and keeps no TIME_WAIT on its side (it would pin one of its ports for 60 s).
+  mov r10d, MSG_NOSIGNAL | MSG_MORE
+.sflags:
   xor r8d, r8d
   xor r9d, r9d
   SYSCALL SYS_sendto

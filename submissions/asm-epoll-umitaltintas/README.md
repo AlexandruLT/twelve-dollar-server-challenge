@@ -58,18 +58,25 @@ four steps:
   the next commit starts the WAL from the beginning. `journal_size_limit` truncates the file.
 - **Pragmas** (all allowed by rule 6): `journal_mode=WAL`, `synchronous=NORMAL`,
   `mmap_size=1 GiB` (reads come from the OS page cache), and a small 8 MB SQLite page cache.
-- **Keep-alive is capped below the fd limit, so connections beyond 65k still get served.** The
-  service runs with `LimitNOFILE=65535`. That is one fd per open connection, and keep-alive
-  clients that are thinking for 3–15 s hold theirs the whole time. Without a cap, the
-  65,536th client could not connect at all. Once 60,000 connections are open, newly accepted ones
-  are answered with `Connection: close` (one request each), while the existing keep-alive
-  connections stay as they are. Deciding per connection matters: when I tried it per request, the
-  open count hovered at the cap, nearly every response closed its connection, and the churn
-  doubled. The server closes first, so `TIME_WAIT` stays on the server, where it costs no fd and
-  no client port. A short connection costs about 10 µs of extra kernel time. If the fd table fills
-  up anyway, the listen socket is taken out of epoll until a connection closes, so the loop
-  doesn't spin on `EMFILE`; new clients wait in the kernel's accept queue meanwhile.
-- **Small memory footprint.** Each connection is a 32-byte record indexed by fd. Buffers are
+- **Keep-alive has a budget, so clients past it are still served.** A keep-alive connection
+  that is thinking for 3–15 s holds two scarce things the whole time: an fd on the server
+  (`LimitNOFILE=65535`) and a local port on the client. A Linux client has about 28,000 ports by
+  default for one server address, so one machine (a NAT, a proxy, a load generator) running more
+  users than that fails to connect at all ("cannot assign requested address"), however fast the
+  server is. So keep-alive has two budgets: 60,000 open connections in total, and 20,000 per
+  client address (counted in 65,536 hashed buckets). New connections past either budget are
+  answered with `Connection: close` (one request each); existing keep-alive connections stay.
+  - Deciding per connection matters: when I tried it per request, the open count hovered at the
+    cap, nearly every response closed its connection, and the churn doubled.
+  - A closing response is sent with `MSG_MORE` and the socket closed right after, so the FIN
+    rides on the last data segment. The client always sees data and FIN together and closes
+    second, so `TIME_WAIT` (60 s) stays on the server, where it costs no fd and no client port.
+    Before this, about 2% of short connections raced into `TIME_WAIT` on the client, and at 64k
+    users from one address those pinned ports ran the client out.
+  - A short connection costs about 10 µs of extra kernel time.
+  - If the fd table fills up anyway, the listen socket is taken out of epoll until a connection
+    closes, so the loop doesn't spin on `EMFILE`; new clients wait in the kernel's accept queue.
+- **Small memory footprint.** Each connection is a 64-byte record indexed by fd. Buffers are
   allocated only for a partial request or for output the socket could not take. The server's RSS
   stays around 25 MB with 64k open connections.
 
@@ -96,6 +103,23 @@ request; the server's RSS stays around 25 MB. At 112k the single core runs out a
 10,400 requests/s: no request fails, but queueing pushes p95 and p99 past the limits. Before the
 keep-alive cap, everything above about 64k VUs failed outright, because the 65,536th connection
 could not be accepted.
+
+**From one client address, as from a single untuned load generator.** Every user above is
+spread over four client addresses with a widened port range. From one address with the default
+Linux port range (about 28,000 ports), 40,000 users failed with 16% "cannot assign requested
+address" errors before the per-address keep-alive budget, all on the client side. With the
+budget and FIN-on-the-last-segment they passed: 40k with 0 errors, and 48k with 0 errors, p95 7 ms
+and p99 42 ms (2 min holds). Beyond about 50k from one address, the load generator itself ran out
+of CPU on this machine: the server stayed under half a core while the generator's own latencies
+went up to seconds. So that is as far as I could measure.
+
+The 96k/112k table above was measured before the per-address budget. With four client addresses
+the budget doesn't change much: each address carries 24k users at 96k, so 4k of them per address
+get short connections, instead of 36k in total under the 60k cap alone. A short connection's
+cost dropped in an alternating A/B (`/health` with a new connection per request, three rounds
+each): 14–16 µs of kernel time before, 10–16 µs after, because the FIN no longer needs its own
+segment. Full-load runs in this environment drifted too much later in the session to compare the
+two builds at 96k again.
 
 Taking new connections every 128 events within a batch (not just once per `epoll_wait`) mattered
 near the limit. In one 96k run it cut the kernel's accept-queue overflows from 49,442 to 2,840,
