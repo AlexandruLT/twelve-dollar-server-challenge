@@ -45,17 +45,17 @@ Routing goes through Oxpecker: `GET [ route ... ]` and `POST [ route ... ]` on A
 
 ## Optimizations, and why
 
-The numbers come from 11 measured experiments, with one change in each. A change stayed only if it was better than the noise. A percentage compares two builds on the same machine at a fixed request rate.
+The numbers come from 26 measured experiments in two rounds, with one change in each. A change stayed only if it was better than the noise. A percentage compares two builds on the same machine at a fixed request rate.
 
 - **Direct instead of Nginx.** On one core, Nginx's CPU comes out of the server's budget.
 - **Inline socket completions** (`DOTNET_SYSTEM_NET_SOCKETS_INLINE_COMPLETIONS=1`, set by the server at startup) and Kestrel's `UnsafePreferInlineScheduling`. A request runs on the socket thread with no hand-off to a thread-pool worker.
-- **No zero-byte read** (`WaitForDataBeforeAllocatingBuffer = false`): one syscall fewer for each request. It cut CPU for each request by about 5%. The cost is about 4 KB of memory for each idle connection (13.1 KB instead of 9.3 KB, measured with 20,000 idle connections).
+- **Kestrel's zero-byte read stays on** (the default). An idle connection then keeps no buffer. On arm64, removing the zero-byte read cut CPU by about 5%. On x86-64 it saved no CPU, and at 64,000 users it used 250 MB more memory. A later commit put the default back.
 - **`route "/posts/{id}"` with the route value, not `routef`.** Oxpecker's `routef` calls the handler through reflection and makes closures for each request. This change cut CPU for each request by another 5%.
 - **SQLite built for this server.** SQLite's recommended compile-time options, such as `DEFAULT_MEMSTATUS=0` and `OMIT_SHARED_CACHE`. `THREADSAFE=2`: one thread at a time uses each connection. `mmap_size` 1 GB, 32 MB page cache.
 - **Raw bindings.** The bindings pass raw handles. The column getters skip the GC transition. Text columns go from SQLite's UTF-8 bytes into the JSON writer with no `string` for each column.
 - **One JSON buffer.** `Utf8JsonWriter` writes into one buffer under the lock, with pre-encoded property names. Each response goes into Kestrel's pipe in one write, with a `Content-Length` header.
 - **Checkpoints off the request thread.** On a disk with slow fsync (about 67 ms), checkpoints on the request thread stopped all requests. With the checkpoint thread, p95 went from 500 ms to 0.21 ms at the same load.
-- **JWT by hand.** HS256 only, `HMACSHA256.HashData` and a constant-time compare, on every request. A token without `exp` fails.
+- **JWT by hand.** HS256 only, HMAC-SHA256 and a constant-time compare, on every request. A token without `exp` fails. Each thread makes one keyed HMAC context and uses it again for each token. Each token is still hashed in full. This cut CPU for each like by about 5%.
 - **GC**: workstation, not concurrent, so no background GC thread uses the one core. Globalization is invariant.
 - **Trim with JavaScript's whitespace set**, as the reference implementations do.
 
@@ -63,16 +63,39 @@ These did not help, and are not in the code:
 
 | Change | Result |
 |---|---|
-| Native AOT | Same CPU as JIT with ReadyToRun and tiered PGO. 55 MB less memory. It needs clang and gives F# trim warnings. |
-| A writer thread with group commit | Reads stopped waiting for the disk, but each write cost twice the CPU (thread hand-offs on one core). |
-| `/feed` JSON built by SQLite (`json_group_array`) | 31% more CPU for each `/feed` request than `Utf8JsonWriter`. |
-| SQLite at `-O3` | No change. |
-| A 64 MB GC gen0 budget | No change. |
-| An inlined `Monitor` lock instead of F#'s `lock` | No change. |
+| Native AOT | arm64: same CPU as JIT with ReadyToRun and tiered PGO. x86-64: 4% more CPU. It saves only 53-55 MB. It links with gcc, so it does not need clang. |
+| A writer thread with group commit | Reads stopped waiting for the slow disk, but each write cost twice the CPU (thread hand-offs on one core). A like costs about 45 us more than a read, and writes are about 8% of the requests. So group commit can save 2% of the CPU at most. |
+| `/feed` JSON built by SQLite (`json_group_array`) | First round: 31% more CPU for each `/feed` request. Second round: 10% more CPU on the mixed load. |
+| SQLite at `-O3` | No change, in both rounds. |
+| GC gen0 budget of 8, 32 or 64 MB | No CPU change. At 64,000 users, a smaller budget gave more GCs with the same pause each, so p99 got worse. |
+| No ReadyToRun (JIT and tiered PGO only) | No change after warm-up. |
+| `EventSourceSupport` and `MetricsSupport` off | No change. |
+| An inlined `Monitor` lock instead of F#'s `lock` | No change. F#'s `lock` is already inline. |
 
 ## Local measurements
 
 These numbers are local diagnostics, not an official score.
+
+### Second round: WSL2 VM on a Windows desktop
+
+- **Machine**: a WSL2 VM on a Windows desktop with an AMD Ryzen 9 7900X3D (12 cores, 24 threads) and 30 GB of RAM. Ubuntu 26.04, kernel 6.18 (WSL2). The disk does an fsync in about 2 ms. Another job used CPUs 0-11 at the same time.
+- **Server**: a Docker container with `ubuntu:24.04` and this `install.sh`. It has 1 CPU (cpuset on one core, with its second thread left idle), 2 GB of memory, no swap, and `nofile` 65535. It serves direct on port 8080.
+- **Load**: kload on CPUs 14-23 over loopback. 1,000 users for 60 s of warm-up, then a 60 s ramp and a 5-minute hold.
+- **CPU note**: system calls cost more in WSL2. Each request used about twice the CPU of the first-round VM.
+
+| Users | Hold | Result | p95 / p99 (whole run) | p95 / p99 (hold) | Errors | Server CPU | Requests/s | Peak RSS |
+|---|---|---|---|---|---|---|---|---|
+| **64,000** | **5 min** | **pass** | **3.5 / 68 ms** | **3.3 / 23 ms** | **0 of 2.03M** | **60%** | **6,771** | **785 MB** |
+
+Before the second round, the same machine gave peak RSS 986 MB at 64,000 users (2-minute hold, p99 74-106 ms). The cgroup memory peak in the final hold was 1,312 MB, which includes the page cache. The WAL file grew to 271 MB.
+
+The p99 at 64,000 users comes from GC pauses. With 64,000 open connections, the heap is about 630 MB, and each gen0 GC stops the server for 100-190 ms. The GC runs about once every 15 seconds.
+
+`test/run.sh` passes 42/42 in a clean `ubuntu:24.04` container with 1 CPU, 2 GB and no swap, after `install.sh`, on this machine. There, `install.sh` took 22 s and `test/run.sh` took 45 s.
+
+### First round: x86-64 VM with a slow disk
+
+These numbers are for commit `ce63f0e`, before the second round.
 
 - **Machine**: a VM with 4 vCPUs of an Intel Core i5-11400F and 3.9 GB of RAM, Ubuntu 26.04. Its disk has slow fsync (about 67 ms).
 - **Server**: a Docker container with `ubuntu:24.04` and this `install.sh`. It has 1 CPU (cpuset), 2 GB of memory, no swap, and `nofile` 65535. It serves direct on port 8080.
