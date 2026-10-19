@@ -40,7 +40,6 @@ let main args =
         .UseKestrelCore()
         .UseSockets(fun o ->
             o.UnsafePreferInlineScheduling <- true // Kestrel's continuations stay on the socket thread
-            o.WaitForDataBeforeAllocatingBuffer <- false
             o.Backlog <- 65535) // the kernel caps it at somaxconn; a ramp of new users should not overflow it
         .ConfigureKestrel(fun o ->
             o.AddServerHeader <- false
