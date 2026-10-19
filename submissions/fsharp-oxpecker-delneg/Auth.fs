@@ -14,6 +14,16 @@ open Microsoft.FSharp.NativeInterop
 
 let mutable key: byte[] = [||]
 
+/// One HMAC-SHA256 context per thread, made once with the key. Each token is still hashed in full (rule 5);
+/// only the OpenSSL context set-up is reused.
+type private Hmac =
+    [<ThreadStatic; DefaultValue>]
+    static val mutable private ctx: IncrementalHash
+    static member Get() =
+        if isNull Hmac.ctx then
+            Hmac.ctx <- IncrementalHash.CreateHMAC(HashAlgorithmName.SHA256, key)
+        Hmac.ctx
+
 let MissingBearer = """{"error":"missing bearer token"}"""B
 let InvalidToken = """{"error":"invalid or expired token"}"""B
 let InvalidPayload = """{"error":"invalid token payload"}"""B
@@ -104,7 +114,9 @@ let verify (ctx: HttpContext) (userId: byref<int64>) (username: byref<string>) :
                 let input = stackSpan<byte> 2048
                 let inputLength = Encoding.ASCII.GetBytes(token.Slice(0, signingEnd), input)
                 let expected = stackSpan<byte> 32
-                HMACSHA256.HashData(ReadOnlySpan<byte>(key), ro (input.Slice(0, inputLength)), expected) |> ignore
+                let hmac = Hmac.Get()
+                hmac.AppendData(ro (input.Slice(0, inputLength)))
+                hmac.GetHashAndReset(expected) |> ignore
                 let signature = stackSpan<byte> 64
                 let mutable sigLength = 0
                 if not (Base64Url.TryDecodeFromChars(part token parts.[2], signature, &sigLength))
