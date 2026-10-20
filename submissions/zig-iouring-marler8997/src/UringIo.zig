@@ -318,13 +318,25 @@ const Closure = struct {
     start: *const fn (context: *const anyopaque) void,
     context: [*]const u8,
 
+    /// The first code a fiber runs. Its stack pointer is just below the
+    /// `Closure` (see `spawn`).
     fn entry() callconv(.naked) void {
-        asm volatile (
-            \\ leaq 8(%%rsp), %%rdi
-            \\ jmp %[call:P]
-            :
-            : [call] "X" (&call),
-        );
+        switch (builtin.cpu.arch) {
+            .x86_64 => asm volatile (
+                \\ leaq 8(%%rsp), %%rdi
+                \\ jmp %[call:P]
+                :
+                : [call] "X" (&call),
+            ),
+            .aarch64 => asm volatile (
+                \\ mov lr, #0
+                \\ mov x0, sp
+                \\ b %[call]
+                :
+                : [call] "X" (&call),
+            ),
+            else => comptime unreachable,
+        }
     }
 
     fn call(closure: *Closure) callconv(.c) noreturn {
@@ -357,7 +369,12 @@ fn spawn(
     const closure: *Closure = @ptrFromInt(closure_addr);
     closure.* = .{ .io = io, .start = start, .context = @ptrFromInt(context_addr) };
     f.* = .{
-        .context = .{ .rsp = closure_addr - 8, .rbp = 0, .rip = @intFromPtr(&Closure.entry) },
+        .context = switch (builtin.cpu.arch) {
+            // as if `entry` had been called: the return address slot is below the closure
+            .x86_64 => .{ .rsp = closure_addr - 8, .rbp = 0, .rip = @intFromPtr(&Closure.entry) },
+            .aarch64 => .{ .sp = closure_addr, .fp = 0, .pc = @intFromPtr(&Closure.entry) },
+            else => comptime unreachable,
+        },
         .group = group,
     };
     io.live_fibers += 1;
@@ -384,8 +401,8 @@ fn destroy(io: *UringIo, f: *Fiber) void {
 /// part the read doesn't fill is unspecified, as with any `net_read`.
 fn park(io: *UringIo, f: *Fiber, dest: []u8) void {
     const bottom = io.slotBottom(f);
-    // build.zig turns off the red zone: nothing live is below rsp.
-    const low = f.context.rsp;
+    // build.zig turns off the red zone: nothing live is below the stack pointer.
+    const low = stackPointer(&f.context);
     const top = io.slotTop(f);
     const dest_start = std.math.clamp(@intFromPtr(dest.ptr), low, top);
     const dest_end = std.math.clamp(@intFromPtr(dest.ptr) + dest.len, dest_start, top);
@@ -481,49 +498,95 @@ pub fn callOnSchedulerStack(io_: Io, comptime func: anytype, args: std.meta.Args
     var c: Call = .{ .args = args };
     io.on_scheduler_stack = true;
     defer io.on_scheduler_stack = false;
-    const top = std.mem.alignBackward(usize, io.scheduler.rsp - 64, 16);
-    asm volatile (
-        \\ movq %%rsp, %%rbx
-        \\ movq %[top], %%rsp
-        \\ callq *%[func]
-        \\ movq %%rbx, %%rsp
-        :
-        : [top] "{r12}" (top),
-          [func] "{r13}" (&Call.run),
-          [arg] "{rdi}" (&c),
-        : call_clobbers);
+    const top = std.mem.alignBackward(usize, stackPointer(&io.scheduler) - 64, 16);
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ movq %%rsp, %%rbx
+            \\ movq %[top], %%rsp
+            \\ callq *%[func]
+            \\ movq %%rbx, %%rsp
+            :
+            : [top] "{r12}" (top),
+              [func] "{r13}" (&Call.run),
+              [arg] "{rdi}" (&c),
+            : call_clobbers),
+        .aarch64 => asm volatile (
+            \\ mov x19, sp
+            \\ mov sp, %[top]
+            \\ blr %[func]
+            \\ mov sp, x19
+            :
+            : [top] "{x20}" (top),
+              [func] "{x21}" (&Call.run),
+              [arg] "{x0}" (&c),
+            : call_clobbers),
+        else => comptime unreachable,
+    }
     return c.result;
+}
+
+fn stackPointer(context: *const Io.fiber.Context) usize {
+    return switch (builtin.cpu.arch) {
+        .x86_64 => context.rsp,
+        .aarch64 => context.sp,
+        else => comptime unreachable,
+    };
 }
 
 /// Saves the current context in `old` and resumes `new`.
 ///
 /// Like `std.Io.fiber.contextSwitch`, but it declares the vector registers the
-/// target actually has as clobbered: std's list names only zmm0-31, which LLVM
-/// ignores without AVX-512, so values kept in ymm/xmm registers across a
-/// switch got corrupted by whatever ran in between.
+/// target actually has as clobbered: std's list names only zmm0-31 (z0-31 on
+/// aarch64), which LLVM ignores without AVX-512 (SVE), so values kept in vector
+/// registers across a switch got corrupted by whatever ran in between.
 inline fn switchContext(old: *Io.fiber.Context, new: *Io.fiber.Context) void {
-    asm volatile (
-        \\ leaq 0f(%%rip), %%rdx
-        \\ movq %%rsp, 0(%%rax)
-        \\ movq %%rbp, 8(%%rax)
-        \\ movq %%rdx, 16(%%rax)
-        \\ movq 0(%%rcx), %%rsp
-        \\ movq 8(%%rcx), %%rbp
-        \\ jmpq *16(%%rcx)
-        \\0:
-        :
-        : [old] "{rax}" (old),
-          [new] "{rcx}" (new),
-        : switch_clobbers);
+    switch (builtin.cpu.arch) {
+        .x86_64 => asm volatile (
+            \\ leaq 0f(%%rip), %%rdx
+            \\ movq %%rsp, 0(%%rax)
+            \\ movq %%rbp, 8(%%rax)
+            \\ movq %%rdx, 16(%%rax)
+            \\ movq 0(%%rcx), %%rsp
+            \\ movq 8(%%rcx), %%rbp
+            \\ jmpq *16(%%rcx)
+            \\0:
+            :
+            : [old] "{rax}" (old),
+              [new] "{rcx}" (new),
+            : switch_clobbers),
+        .aarch64 => asm volatile (
+            \\ adr x2, 0f
+            \\ mov x3, sp
+            \\ stp x3, fp, [x0]
+            \\ str x2, [x0, #16]
+            \\ ldp x3, fp, [x1]
+            \\ ldr x2, [x1, #16]
+            \\ mov sp, x3
+            \\ br x2
+            \\0:
+            :
+            : [old] "{x0}" (old),
+              [new] "{x1}" (new),
+            : switch_clobbers),
+        else => comptime unreachable,
+    }
 }
 
-/// Everything but rsp and rbp (which the switch saves) is clobbered.
-const switch_clobbers = clobbers(&.{ "rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" });
-/// A call through the SysV ABI clobbers the caller-saved registers (rbx holds
-/// the old stack pointer).
-const call_clobbers = clobbers(&.{ "rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9", "r10", "r11" });
+/// Everything but the stack and frame pointers (which the switch saves) is clobbered.
+const switch_clobbers = switch (builtin.cpu.arch) {
+    .x86_64 => x86Clobbers(&.{ "rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15" }),
+    .aarch64 => aarch64Clobbers(28),
+    else => @compileError("UringIo supports x86_64 and aarch64, not " ++ @tagName(builtin.cpu.arch)),
+};
+/// A call clobbers the caller-saved registers, plus the one holding the old
+/// stack pointer (rbx, x19).
+const call_clobbers = switch (builtin.cpu.arch) {
+    .x86_64 => x86Clobbers(&.{ "rax", "rcx", "rdx", "rbx", "rsi", "rdi", "r8", "r9", "r10", "r11" }),
+    .aarch64 => aarch64Clobbers(19),
+    else => unreachable,
+};
 
-fn clobbers(comptime gprs: []const []const u8) std.lang.assembly.Clobbers {
+fn x86Clobbers(comptime gprs: []const []const u8) std.lang.assembly.Clobbers {
     @setEvalBranchQuota(10_000);
     var c: std.lang.assembly.Clobbers = .{ .memory = true, .fpsr = true, .fpcr = true, .mxcsr = true, .rflags = true, .dirflag = true };
     for (gprs) |r| @field(c, r) = true;
@@ -538,6 +601,26 @@ fn clobbers(comptime gprs: []const []const u8) std.lang.assembly.Clobbers {
     for (0..vector_count) |i| @field(c, std.fmt.comptimePrint("{s}{d}", .{ vector_prefix, i })) = true;
     for (0..8) |i| @field(c, std.fmt.comptimePrint("mm{d}", .{i})) = true;
     for (0..8) |i| @field(c, std.fmt.comptimePrint("st{d}", .{i})) = true;
+    return c;
+}
+
+/// Clobbers x0 through `last_gpr` and the link register. x18 is skipped when
+/// the target reserves it. All vector registers are clobbered in full, which
+/// also covers the callee-saved low halves of v8-v15.
+fn aarch64Clobbers(comptime last_gpr: u5) std.lang.assembly.Clobbers {
+    @setEvalBranchQuota(100_000);
+    var c: std.lang.assembly.Clobbers = .{ .memory = true, .nzcv = true, .fpsr = true, .fpcr = true, .lr = true };
+    const features = builtin.cpu.features;
+    const has = std.Target.aarch64.featureSetHas;
+    for (0..@as(usize, last_gpr) + 1) |i| {
+        if (i == 18 and has(features, .reserve_x18)) continue;
+        @field(c, std.fmt.comptimePrint("x{d}", .{i})) = true;
+    }
+    for (0..32) |i| @field(c, std.fmt.comptimePrint("v{d}", .{i})) = true;
+    if (has(features, .sve)) {
+        for (0..32) |i| @field(c, std.fmt.comptimePrint("z{d}", .{i})) = true;
+        for (0..16) |i| @field(c, std.fmt.comptimePrint("p{d}", .{i})) = true;
+    }
     return c;
 }
 
