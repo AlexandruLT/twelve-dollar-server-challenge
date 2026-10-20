@@ -8,7 +8,7 @@ final class Out {
     static final byte[] S200 = status("200 OK"), S201 = status("201 Created"), S400 = status("400 Bad Request"),
             S401 = status("401 Unauthorized"), S404 = status("404 Not Found"), S413 = status("413 Content Too Large"),
             S431 = status("431 Request Header Fields Too Large"), S500 = status("500 Internal Server Error"),
-            S503 = status("503 Service Unavailable");
+            S501 = status("501 Not Implemented"), S503 = status("503 Service Unavailable");
     private static final byte[] CLOSE = ascii("Connection: close\r\n");
     private static final byte[] LENGTH = ascii("Content-Length: ");
     private static final byte[] END = ascii("\r\n\r\n");

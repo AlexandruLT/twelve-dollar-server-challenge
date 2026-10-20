@@ -31,7 +31,8 @@ final class Server {
             E_INVALID_TOKEN = err("invalid or expired token"), E_BAD_PAYLOAD = err("invalid token payload"),
             E_MALFORMED = err("malformed JSON body"), E_BODY_REQUIRED = err("body is required"),
             E_BODY_TOO_LONG = err("body must be at most 500 characters"), E_INTERNAL = err("internal server error"),
-            E_BAD_REQUEST = err("bad request"), E_TOO_LARGE = err("request too large");
+            E_BAD_REQUEST = err("bad request"), E_TOO_LARGE = err("request too large"),
+            E_NOT_IMPLEMENTED = err("not implemented");
     private static final byte[] LIKED_NEW = Out.ascii("{\"liked\":true,\"already_liked\":false,\"post_id\":");
     private static final byte[] LIKED_AGAIN = Out.ascii("{\"liked\":true,\"already_liked\":true,\"post_id\":");
     private static final byte[] HEALTH_OK = Out.ascii("{\"status\":\"ok\",\"db\":\"ok\",\"uptime_s\":");
@@ -361,7 +362,8 @@ final class Server {
 
         authFrom = authTo = -1;
         long contentLength = 0;
-        boolean connClose = false, connKeepAlive = false, chunked = false;
+        boolean connClose = false, connKeepAlive = false, hasLength = false;
+        int teFrom = -1, teTo = -1;
         int line = eol + 2;
         while (line < he - 2) {
             int le = indexOf(b, (byte) '\r', line, he);
@@ -376,6 +378,7 @@ final class Server {
                     authTo = ve;
                 } else if (nl == 14 && nameIs(b, line, "content-length")) {
                     contentLength = 0;
+                    hasLength = true;
                     if (vs == ve) return reject(c, Out.S400, E_BAD_REQUEST, end - p);
                     for (int k = vs; k < ve; k++) {
                         if (b[k] < '0' || b[k] > '9' || contentLength > MAX_BODY) {
@@ -388,20 +391,41 @@ final class Server {
                     if (containsIgnoreCase(b, vs, ve, "close")) connClose = true;
                     if (containsIgnoreCase(b, vs, ve, "keep-alive")) connKeepAlive = true;
                 } else if (nl == 17 && nameIs(b, line, "transfer-encoding")) {
-                    chunked = true;
+                    if (teFrom >= 0) return reject(c, Out.S400, E_BAD_REQUEST, end - p);
+                    teFrom = vs;
+                    teTo = ve;
                 }
             }
             line = le + 2;
         }
-        if (chunked) return reject(c, Out.S400, E_BAD_REQUEST, end - p);
-        if (contentLength > MAX_BODY) return reject(c, Out.S413, E_TOO_LARGE, end - p);
-        int total = he - p + (int) contentLength;
-        if (end - p < total) return 0;
+        int msgEnd;
+        boolean chunked = teFrom >= 0;
+        if (chunked) {
+            // Transfer-Encoding with Content-Length, or on HTTP/1.0, is how requests get smuggled
+            // past a proxy (RFC 9112 6.1), so both are refused rather than guessed at.
+            if (!http11 || hasLength) return reject(c, Out.S400, E_BAD_REQUEST, end - p);
+            if (teTo - teFrom != 7 || !nameIs(b, teFrom, "chunked")) {
+                boolean last = teTo - teFrom > 7 && nameIs(b, teTo - 7, "chunked");
+                return reject(c, last ? Out.S501 : Out.S400, last ? E_NOT_IMPLEMENTED : E_BAD_REQUEST, end - p);
+            }
+            msgEnd = chunked(b, he, end, false);
+            if (msgEnd == MALFORMED) return reject(c, Out.S400, E_BAD_REQUEST, end - p);
+            if (msgEnd == TOO_LARGE) return reject(c, Out.S413, E_TOO_LARGE, end - p);
+            if (msgEnd == INCOMPLETE) return 0;
+            bodyLen = chunkedLen;
+        } else {
+            if (contentLength > MAX_BODY) return reject(c, Out.S413, E_TOO_LARGE, end - p);
+            msgEnd = he + (int) contentLength;
+            if (end < msgEnd) return 0;
+            bodyLen = (int) contentLength;
+        }
+        int total = msgEnd - p;
         bodyFrom = he;
-        bodyLen = (int) contentLength;
 
         int route = route(b, isGet, isPost);
         if (!commitMode && (route == CREATE || route == LIKE)) return -1;
+        // Only now, since a deferred request is parsed again from its raw bytes.
+        if (chunked) chunked(b, he, msgEnd, true);
         c.closeAfterWrite = http11 ? connClose : !connKeepAlive;
         out.close = c.closeAfterWrite;
         int mark = out.pos;
@@ -413,6 +437,47 @@ final class Server {
             out.respond(Out.S500, E_INTERNAL);
         }
         return total;
+    }
+
+    private static final int INCOMPLETE = 0, MALFORMED = -1, TOO_LARGE = -2;
+    private int chunkedLen;
+
+    // Walks a chunked body starting at b[from] and returns the index just past it, or INCOMPLETE,
+    // MALFORMED or TOO_LARGE. Sets chunkedLen to the decoded length; with compact it also moves the
+    // chunk data down so the decoded body is b[from, from + chunkedLen). Extensions and trailer
+    // fields are skipped.
+    private int chunked(byte[] b, int from, int end, boolean compact) {
+        int k = from, len = 0;
+        while (true) {
+            int size = 0, start = k, d;
+            while (k < end && (d = Character.digit(b[k], 16)) >= 0) {
+                size = size * 16 + d;
+                if (len + size > MAX_BODY) return TOO_LARGE;
+                k++;
+            }
+            if (k == end) return INCOMPLETE;
+            if (k == start || b[k] != '\r' && b[k] != ';' && b[k] != ' ' && b[k] != '\t') return MALFORMED;
+            int eol = indexOf(b, (byte) '\r', k, end);
+            if (eol < 0 || eol + 1 == end) return INCOMPLETE;
+            if (b[eol + 1] != '\n') return MALFORMED;
+            k = eol + 2;
+            if (size == 0) break;
+            if (end - k < size + 2) return INCOMPLETE;
+            if (b[k + size] != '\r' || b[k + size + 1] != '\n') return MALFORMED;
+            if (compact) System.arraycopy(b, k, b, from + len, size);
+            len += size;
+            k += size + 2;
+        }
+        while (true) {
+            int eol = indexOf(b, (byte) '\r', k, end);
+            if (eol < 0 || eol + 1 == end) return INCOMPLETE;
+            if (b[eol + 1] != '\n') return MALFORMED;
+            if (eol == k) {
+                chunkedLen = len;
+                return eol + 2;
+            }
+            k = eol + 2;
+        }
     }
 
     private int reject(Conn c, byte[] status, byte[] body, int consumed) {
