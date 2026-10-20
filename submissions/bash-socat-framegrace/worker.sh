@@ -135,6 +135,7 @@ while IFS= read -r -t 70 request_line; do
     proto="${rest#* }"
 
     content_length=0
+    is_chunked=0
     auth_header=""
     conn_header=""
 
@@ -145,8 +146,13 @@ while IFS= read -r -t 70 request_line; do
         case "$header_line" in
             [Cc][Oo][Nn][Tt][Ee][Nn][Tt]-[Ll][Ee][Nn][Gg][Tt][Hh]:*)
                 val="${header_line#*:}"
-                val="${val#"${val%%[! ]*}"}"
-                content_length="${val%"${val##*[! ]}"}"
+                content_length="${val//[!0-9]/}"
+                ;;
+            [Tt][Rr][Aa][Nn][Ss][Ff][Ee][Rr]-[Ee][Nn][Cc][Oo][Dd][Ii][Nn][Gg]:*)
+                val="${header_line#*:}"
+                if [[ "$val" == *[Cc][Hh][Uu][Nn][Kk][Ee][Dd]* ]]; then
+                    is_chunked=1
+                fi
                 ;;
             [Aa][Uu][Tt][Hh][Oo][Rr][Ii][Zz][Aa][Tt][Ii][Oo][Nn]:*)
                 val="${header_line#*:}"
@@ -163,7 +169,24 @@ while IFS= read -r -t 70 request_line; do
 
     # Read body if any
     body=""
-    if (( content_length > 0 )); then
+    if (( is_chunked )); then
+        while IFS= read -r -t 10 chunk_header; do
+            chunk_size_hex="${chunk_header%%;*}"
+            chunk_size_hex="${chunk_size_hex//[!0-9A-Fa-f]/}"
+            [[ -z "$chunk_size_hex" ]] && continue
+            chunk_size=$(( 16#$chunk_size_hex ))
+            if (( chunk_size == 0 )); then
+                while IFS= read -r -t 10 trailer_line; do
+                    trailer_line="${trailer_line%$'\r'}"
+                    [[ -z "$trailer_line" ]] && break
+                done
+                break
+            fi
+            IFS= read -r -N "$chunk_size" -t 10 chunk_data
+            body+="$chunk_data"
+            IFS= read -r -t 10 _
+        done
+    elif (( content_length > 0 )); then
         IFS= read -r -N "$content_length" -t 10 body
     fi
 
