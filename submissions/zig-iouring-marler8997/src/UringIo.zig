@@ -9,7 +9,9 @@
 //! is "parked": its live stack bytes, minus the read's destination, are copied
 //! to a small heap block and the slot's pages go back to the kernel. When the
 //! read completes the bytes are copied back to the same addresses. An idle
-//! connection costs about a kilobyte instead of a few stack pages.
+//! connection costs about a kilobyte instead of a few stack pages. Parking
+//! waits until a few hundred newer fibers wait in reads, so a busy
+//! connection's next request usually arrives first and skips it.
 //!
 //! `callOnSchedulerStack` runs deep work that never suspends (SQLite, JSON) on
 //! the scheduler's stack, so fiber stacks stay a page or two deep.
@@ -28,6 +30,9 @@ current: ?*Fiber = null,
 /// Set by a fiber right before it switches to the scheduler.
 yield_action: YieldAction = .none,
 ready: FiberQueue = .{},
+/// Fibers waiting in a read whose stacks are not packed yet, oldest first.
+/// See `deferPark`.
+unpacked: FiberList = .{},
 futex_waiters: ?*Fiber = null,
 on_scheduler_stack: bool = false,
 
@@ -74,8 +79,32 @@ const Fiber = struct {
     parked_on_base: bool = false,
     /// Whether this fiber has done a read, see `park`.
     did_read: bool = false,
+    /// Whether it is in `UringIo.unpacked` (`next` and `prev` link it).
+    unpacked: bool = false,
+    prev: ?*Fiber = null,
 
     const Range = struct { start: u32 = 0, len: u32 = 0 };
+};
+
+const FiberList = struct {
+    head: ?*Fiber = null,
+    tail: ?*Fiber = null,
+    len: u32 = 0,
+
+    fn append(l: *FiberList, f: *Fiber) void {
+        f.prev = l.tail;
+        f.next = null;
+        if (l.tail) |t| t.next = f else l.head = f;
+        l.tail = f;
+        l.len += 1;
+    }
+    fn remove(l: *FiberList, f: *Fiber) void {
+        if (f.prev) |p| p.next = f.next else l.head = f.next;
+        if (f.next) |n| n.prev = f.prev else l.tail = f.prev;
+        f.prev = null;
+        f.next = null;
+        l.len -= 1;
+    }
 };
 
 const FiberQueue = struct {
@@ -215,7 +244,7 @@ fn resume_(io: *UringIo, f: *Fiber) void {
     io.current = null;
     switch (io.yield_action) {
         .none => {},
-        .park => |dest| io.park(f, dest),
+        .park => |dest| io.deferPark(f, dest),
         .finish => io.destroy(f),
     }
 }
@@ -279,6 +308,11 @@ fn complete(io: *UringIo, cqe: linux.io_uring_cqe) void {
 }
 
 fn makeReady(io: *UringIo, f: *Fiber) void {
+    if (f.unpacked) {
+        // Its read completed before the stack was packed: it still has it.
+        io.unpacked.remove(f);
+        f.unpacked = false;
+    }
     io.ready.push(f);
 }
 
@@ -396,10 +430,11 @@ fn destroy(io: *UringIo, f: *Fiber) void {
     io.free_slots = f;
 }
 
-/// Saves the stack of `f` (which just suspended on a read into `dest`) and
-/// releases its pages. `dest` is excluded: the read overwrites it, and the
-/// part the read doesn't fill is unspecified, as with any `net_read`.
-fn park(io: *UringIo, f: *Fiber, dest: []u8) void {
+/// Parks `f` (which just suspended on a read into `dest`) once
+/// `max_unpacked` newer fibers are waiting in reads. A busy connection's next
+/// request usually comes first: it then skips packing, releasing the pages and
+/// faulting them back in, which cost more than the rest of a small request.
+fn deferPark(io: *UringIo, f: *Fiber, dest: []u8) void {
     const bottom = io.slotBottom(f);
     // build.zig turns off the red zone: nothing live is below the stack pointer.
     const low = stackPointer(&f.context);
@@ -408,6 +443,28 @@ fn park(io: *UringIo, f: *Fiber, dest: []u8) void {
     const dest_end = std.math.clamp(@intFromPtr(dest.ptr) + dest.len, dest_start, top);
     f.parked_lo = .{ .start = @intCast(low - bottom), .len = @intCast(dest_start - low) };
     f.parked_hi = .{ .start = @intCast(dest_end - bottom), .len = @intCast(top - dest_end) };
+    io.unpacked.append(f);
+    f.unpacked = true;
+    if (io.unpacked.len > max_unpacked) {
+        const oldest = io.unpacked.head.?;
+        io.unpacked.remove(oldest);
+        oldest.unpacked = false;
+        io.park(oldest);
+    }
+}
+
+/// Stacks that are kept resident this way cost a page or two each.
+const max_unpacked = 256;
+
+/// Saves the stack of `f`, which is waiting in a read, except the read's
+/// destination (between `parked_lo` and `parked_hi`), and releases its pages.
+/// The destination is excluded because the read overwrites it, and the part
+/// it doesn't fill is unspecified, as with any `net_read`.
+/// The read is still pending: with DEFER_TASKRUN the kernel fills the
+/// destination only inside io_uring_enter, and a completed read takes the
+/// fiber out of `unpacked` first, so no received bytes are released.
+fn park(io: *UringIo, f: *Fiber) void {
+    const bottom = io.slotBottom(f);
     const lo = io.slotBytes(f, f.parked_lo);
     const hi = io.slotBytes(f, f.parked_hi);
     if (park_base.len == 0 and lo.len + hi.len <= park_base.bytes.len) {
