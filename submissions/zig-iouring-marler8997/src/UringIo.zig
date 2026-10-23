@@ -644,7 +644,7 @@ const call_clobbers = switch (builtin.cpu.arch) {
 };
 
 fn x86Clobbers(comptime gprs: []const []const u8) std.lang.assembly.Clobbers {
-    @setEvalBranchQuota(10_000);
+    @setEvalBranchQuota(100_000); // batch 2: AVX-512 CPUs loop over 32 zmm registers at comptime
     var c: std.lang.assembly.Clobbers = .{ .memory = true, .fpsr = true, .fpcr = true, .mxcsr = true, .rflags = true, .dirflag = true };
     for (gprs) |r| @field(c, r) = true;
     const features = builtin.cpu.features;

@@ -21,7 +21,7 @@ SWIFT_VERSION=6.2.1
 SWIFT_DIR=/opt/swift
 if [ ! -x "$SWIFT_DIR/usr/bin/swift" ]; then
     TARBALL="swift-${SWIFT_VERSION}-RELEASE-ubuntu24.04.tar.gz"
-    URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2404/${TARBALL}"
+    URL="https://download.swift.org/swift-${SWIFT_VERSION}-release/ubuntu2404/swift-${SWIFT_VERSION}-RELEASE/${TARBALL}" # batch 2: the release folder was missing (404)
     echo "downloading $URL"
     curl -fsSL "$URL" -o "/tmp/${TARBALL}"
     mkdir -p "$SWIFT_DIR"

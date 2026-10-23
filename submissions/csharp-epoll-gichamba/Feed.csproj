@@ -13,7 +13,7 @@
     <!-- One native binary, compiled on the box for the box's CPU. -->
     <PublishAot>true</PublishAot>
     <RuntimeIdentifier>linux-x64</RuntimeIdentifier>
-    <IlcInstructionSet>native</IlcInstructionSet>
+    <IlcInstructionSet>x86-64-v3</IlcInstructionSet><!-- batch 2: native fails in ilc on AVX-512 (Vector256) -->
     <OptimizationPreference>Speed</OptimizationPreference>
     <InvariantGlobalization>true</InvariantGlobalization>
 
