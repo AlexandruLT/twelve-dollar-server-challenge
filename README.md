@@ -109,5 +109,4 @@ not one at a time, on no fixed schedule, and share the results once a batch is d
 
 ## Results
 
-- [Batch 1](benchmarks/batch-1.md) (2026-10-10/11, the DigitalOcean $12 droplet): 26 submissions; top 64,000 users, the droplet's connection limit
-- [Batch 2](benchmarks/batch-2.md) (2026-10-20/21, Synteq 1 vCPU / 2 GB VPS): 26 new submissions + 3 anchors; top score 264,000 users (Rust io_uring, #82)
+**[Leaderboard](LEADERBOARD.md)**: every submission on the same 1 vCPU / 2 GB box, updated as new PRs are benchmarked.

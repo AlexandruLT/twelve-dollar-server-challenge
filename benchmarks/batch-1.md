@@ -1,5 +1,8 @@
 # Batch 1 results (2026-10-10/11)
 
+> **Superseded by the [leaderboard](../LEADERBOARD.md).** This is the first run, on a DigitalOcean droplet; its numbers
+> aren't comparable with the leaderboard's box. Kept for reference.
+
 All 28 pull requests open on 2026-10-09: 26 benchmarked, 1 failed to start (#31 R) and 1 not run (#21, which by its own
 README doesn't use SQLite).
 
