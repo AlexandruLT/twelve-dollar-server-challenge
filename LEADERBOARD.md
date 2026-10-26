@@ -63,8 +63,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 34 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
 | 35 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
 | 36 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
-| 37 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
-| 38 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
+| 37 | kotlin-ktor-jvm-syorito-hatsuki | #36 | Kotlin (Ktor, JVM) | **14,000** | 1,370 | 370 | 728 | 0.00 | 79 | 536 | 603 | 2026-10-26 |
+| 38 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
+| 39 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | cpp-uwebsockets-v2-tbsvttr | #15 | C++ (uWebSockets) | waiting for a re-run on this box | | | | | | | | |
 | — | zig-usockets-tbsvttr | #25 | Zig (uSockets) | waiting for a re-run on this box | | | | | | | | |
@@ -137,7 +138,10 @@ committed in this repo.
 
 - **Tokens without `exp` accepted** (SPEC requires rejecting them): asm-epoll #117, java-nio #88, quarkus #67 (SmallRye
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), csharp #74, bash #89,
-  cpp-eastl #32, go-gnet #38 (both held open until fixed).
+  cpp-eastl #32, go-gnet #38, kotlin-ktor #36 (all three held open until fixed).
+- **Kotlin Ktor #36 commits `gradle/wrapper/gradle-wrapper.jar`** (a prebuilt jar, rule 10 question; the wrapper
+  properties have no `distributionSha256Sum`). It also returned a few HTTP 500s on writes under load (1–5 per probe,
+  0 in the scored hold); its StatusPages handler doesn't log the exception.
 - **Past ~327k connections, cpp-eastl #32 evicts the connection it just served** because "the think-time loop visits
   users in the same order every time" (its README) — tuned to the load test's order (rule 7 question). Its score
   (219k) is below that point, so it doesn't affect the number.
