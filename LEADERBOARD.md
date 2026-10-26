@@ -62,8 +62,9 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 32 | swift-hummingbird-denizak ᵖ | #43 | Swift (Hummingbird) | **48,000** | 4,700 | 210 | 300 | 0.00 | 97 | 191 | 1,269 | 2026-10-21 |
 | 34 | java-spring-boot-nb-99 | #33 | Java (Spring Boot WebFlux) | **32,000** | 3,151 | 9.9 | 27 | 0.00 | 81 | 239 | 763 | 2026-10-26 |
 | 35 | java-quarkus-wolches | #67 | Java (Quarkus) | **29,000** ᵈ | 2,838 | 306 | 451 | 0.00 | 50 | 164 | 542 | 2026-10-21 |
-| 36 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
-| 37 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
+| 36 | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | **28,000** | 2,751 | 76 | 174 | 0.00 | 85 | 287 | 1,214 | 2026-10-26 |
+| 37 | ruby-rails-gambitboy | #2 | Ruby (Rails), behind Nginx | **9,000** | 876 | 322 | 443 | 0.00 | 97 | 1,031 | 257 | 2026-10-25 |
+| 38 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
 | — | cpp-uwebsockets-v2-tbsvttr | #15 | C++ (uWebSockets) | waiting for a re-run on this box | | | | | | | | |
 | — | zig-usockets-tbsvttr | #25 | Zig (uSockets) | waiting for a re-run on this box | | | | | | | | |
@@ -77,7 +78,6 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | — | csharp-aspnetcore-andrexx | #20 | C# (ASP.NET Core) | waiting for a re-run on this box | | | | | | | | |
 | — | go-nethttp-tbsvttr | #18 | Go (net/http) | waiting for a re-run on this box | | | | | | | | |
 | — | python-granian-tbsvttr | #13 | Python (Granian) | waiting for a re-run on this box | | | | | | | | |
-| — | erlang-cowboy-tbsvttr | #11 | Erlang (Cowboy) | waiting for a re-run on this box | | | | | | | | |
 | — | ruby-iodine-tbsvttr | #14 | Ruby (iodine) | waiting for a re-run on this box | | | | | | | | |
 | — | python-litestar-przwr | #23 | Python (Litestar) | waiting for a re-run on this box | | | | | | | | |
 | — | ruby-rails-tbsvttr | #12 | Ruby (Rails) | waiting for a re-run on this box | | | | | | | | |
