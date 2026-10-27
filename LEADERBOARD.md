@@ -179,10 +179,10 @@ committed in this repo.
   grace), kotlin #83, scala #107, node-uws #102, dart #46, go-champ3oy #76, pypy #84 (deliberately), csharp #74, bash #89,
   go-gnet #38, kotlin-ktor #36, python-fastapi-granian #41, go-stdlib #44, kotlin-ktor-C-Hatton #45, typescript-fastify #51, go-epoll-damianoneill #52,
   kotlin-ktor-graalvm #53, go-fasthttp #56, java-netty #57, bun-elysia #59, node-fastify #61, java-netty-lfeagan #63, c-iouring-27bhd #68, node-net #78, pypy-twisted #79 (all held open until fixed). cpp-eastl #32 fixed it in `4d5e225` (re-scored and merged).
-- **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`** (a prebuilt jar, rule 10
-  question; the wrapper properties have no `distributionSha256Sum`). It also returned a few HTTP 500s on writes under load (1–5 per probe,
+- **Kotlin Ktor #36 (and #53, based on it) commit `gradle/wrapper/gradle-wrapper.jar`**. Arjay ruled (2026-10-26) that
+  the standard Gradle wrapper jar is fine and not a prebuilt binary under rule 10. Kotlin Ktor #36 also returned a few HTTP 500s on writes under load (1–5 per probe,
   0 in the scored hold); its StatusPages handler doesn't log the exception. kotlin-springboot #66 commits the same
-  jar (its wrapper properties do pin `distributionSha256Sum`); held open until Arjay decides or the jar is dropped.
+  jar and was merged on that ruling.
 - **Past ~327k connections, cpp-eastl #32 evicts the connection it just served** because "the think-time loop visits
   users in the same order every time" (its README) — tuned to the load test's order (rule 7 question). Its score
   (210k) is below that point, so it doesn't affect the number.
