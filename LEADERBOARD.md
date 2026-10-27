@@ -103,6 +103,7 @@ CPU % and µs/request are the app's own cgroup over the scored hold (µs = app C
 | 73 | ruby-rails-tbsvttr | #12 | Ruby (Rails) | **9,000** | 875 | 409 | 562 | 0.00 | 98 | 1,043 | 305 | 2026-10-26 |
 | 75 | bash-socat-framegrace | #89 | Bash (socat, behind Nginx) | **3,500** | 344 | 18 | 43 | 0.00 | 64 | — | 107 | 2026-10-21 |
 | — | nim-io_uring-NioHast | #132 | Nim (io_uring) | **failed** (hangs) | | | | | | | | 2026-10-21 |
+| — | v-fasthttp-ulises-jeremias | #69 | V (fasthttp) | **failed** (install OOM) | | | | | | | | 2026-10-27 |
 
 ˣ **Rust #82 ran out of load generators first.** One target IP × 4 load generators caps at ~240,000 connections (source
 ports). It passed 240,000 at 79 % CPU, so it was re-searched with 3 extra IPv4s on the box and a 5th load generator
@@ -161,6 +162,9 @@ committed in this repo.
 - **Nim #132 — failed, twice.** First run: passed /health, then wedged during the test suite — 0 s CPU, blocked in
   `io_uring_enter` (io_cqring_wait), 192 connections stuck in CLOSE-WAIT: its multishot accept stopped delivering. Retry
   (fresh build; its PGO build fell back to a plain build): stuck at the suite's first read. Kernel 6.8.0-117.
+- **V #69 — install failed** (`913da3f`): `make v` bootstraps the V compiler from source, and its `v1` stage reached
+  1.78 GB RSS and was OOM-killed on the 2 GB box (kernel log, exit 137), so `v` was never installed and the app
+  couldn't build. CI passed on GitHub's bigger runner. Not patched (it isn't a one-line fix).
 - **D #123** (vibe.d) — dropped before the run: fails test.sh (HTML default 404 body; a bad `sub` crashes with 500).
 
 ## Rule flags from code review (nothing malicious found; please fix in a follow-up PR)
